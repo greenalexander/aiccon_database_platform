@@ -4,10 +4,10 @@ processing/pipeline.py
 Orchestrates the processing stage of the aiccon-data pipeline.
 
 For each active domain it:
-    1. Loads raw parquet files from the SharePoint raw layer
+    1. Loads raw parquet files from GCS raw layer
     2. Harmonises geography, legal form, and NACE codes
     3. Merges sources with priority resolution
-    4. Writes a single processed parquet to the SharePoint processed layer
+    4. Writes a single processed parquet to GCS processed layer
 
 Currently implemented domains:
     - social_economy  ← active
@@ -35,11 +35,11 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ingestion.loaders.base_loader import get_logger, load_config, processed_path
-from ingestion.loaders.sharepoint_loader import (
-    check_sharepoint_available,
+from ingestion.loaders.base_loader import get_logger, load_config
+from ingestion.loaders.gcs_uploader import (
+    check_gcs_available,
     upload_processed,
     write_pipeline_log,
 )
@@ -84,17 +84,16 @@ def run_domain(domain: str, config: dict) -> dict:
     Returns
     -------
     dict
-        Summary dict with keys: domain, status, rows, output_path, error.
+        Summary dict with keys: domain, status, rows, output_uri, error.
     """
     summary = {
-        "domain": domain,
-        "status": "not_started",
-        "rows": 0,
-        "output_path": None,
-        "error": None,
+        "domain":     domain,
+        "status":     "not_started",
+        "rows":       0,
+        "output_uri": None,
+        "error":      None,
     }
 
-    # Check domain is registered
     if domain not in DOMAIN_PROCESSORS:
         msg = (
             f"Domain '{domain}' has no registered processor. "
@@ -102,10 +101,9 @@ def run_domain(domain: str, config: dict) -> dict:
         )
         logger.error(msg)
         summary["status"] = "error"
-        summary["error"] = msg
+        summary["error"]  = msg
         return summary
 
-    # Check domain is enabled in settings.yaml
     domain_config = config.get("domains", {}).get(domain, {})
     if not domain_config.get("enabled", False):
         logger.info(f"Domain '{domain}' is disabled in settings.yaml — skipping.")
@@ -116,6 +114,7 @@ def run_domain(domain: str, config: dict) -> dict:
     logger.info(f"Processing domain: {domain}")
     logger.info(f"{'─' * 50}")
 
+    tmp_path = None
     try:
         merge_fn = DOMAIN_PROCESSORS[domain]
         df = merge_fn(config)
@@ -128,34 +127,31 @@ def run_domain(domain: str, config: dict) -> dict:
         summary["rows"] = len(df)
         logger.info(f"{domain}: merge produced {len(df):,} rows.")
 
-        # Write to a temp file, then upload to SharePoint processed layer
-        # Using a temp file avoids writing a partial file to SharePoint
-        # if something goes wrong mid-write.
-        with tempfile.NamedTemporaryFile(
-            suffix=".parquet", delete=False, prefix=f"{domain}_"
-        ) as tmp:
+        # Write to a local temp file first, then upload to GCS.
+        # This avoids uploading a partial file if something goes wrong mid-write.
+        date_suffix = datetime.now(timezone.utc).strftime("%Y-%m")
+        dest_filename = f"{domain}_{date_suffix}.parquet"
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
             tmp_path = Path(tmp.name)
 
         df.to_parquet(tmp_path, index=False, engine="pyarrow")
         logger.info(f"{domain}: written to temp file ({tmp_path.stat().st_size / 1024:.1f} KB)")
 
-        dest = upload_processed(tmp_path, domain, config, logger)
+        uri = upload_processed(tmp_path, domain, config, logger, dest_filename=dest_filename)
         tmp_path.unlink()
+        tmp_path = None
 
-        summary["status"] = "success"
-        summary["output_path"] = str(dest)
-        logger.info(f"{domain}: uploaded to {dest}")
+        summary["status"]     = "success"
+        summary["output_uri"] = uri
+        logger.info(f"{domain}: uploaded to {uri}")
 
     except Exception as e:
         logger.error(f"{domain}: processing failed — {e}", exc_info=True)
         summary["status"] = "error"
-        summary["error"] = str(e)
-        # Clean up temp file if it exists
-        try:
-            if "tmp_path" in locals():
-                tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        summary["error"]  = str(e)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
     return summary
 
@@ -182,18 +178,15 @@ def run_processing(
     """
     cfg = config or load_config()
 
-    # Check SharePoint is reachable before doing any work
-    if not check_sharepoint_available(cfg, logger):
+    if not check_gcs_available(cfg, logger):
         raise RuntimeError(
-            "SharePoint synced folder is not reachable. "
-            "Check that OneDrive sync is running and SHAREPOINT_ROOT is set correctly."
+            "GCS bucket is not reachable. "
+            "Check that GOOGLE_APPLICATION_CREDENTIALS and GCS_BUCKET are set correctly."
         )
 
-    # Determine which domains to run
     if domains:
         to_run = domains
     else:
-        # All domains that are registered AND enabled in config
         to_run = [
             d for d in DOMAIN_PROCESSORS
             if cfg.get("domains", {}).get(d, {}).get("enabled", False)
@@ -217,7 +210,6 @@ def run_processing(
     finished_at = datetime.now(timezone.utc)
     elapsed = (finished_at - started_at).total_seconds()
 
-    # Print summary table
     logger.info(f"\n{'═' * 50}")
     logger.info("Processing stage complete")
     logger.info(f"{'═' * 50}")
@@ -227,17 +219,16 @@ def run_processing(
         logger.info(f"  {s['domain']:<20} {s['status']:<10} {rows_str}{err_str}")
     logger.info(f"Elapsed: {elapsed:.1f}s")
 
-    # Write pipeline log to SharePoint database folder
     try:
         write_pipeline_log(
             cfg,
             run_summary={
-                "stage": "processing",
-                "started_at": started_at.isoformat(),
-                "finished_at": finished_at.isoformat(),
+                "stage":           "processing",
+                "started_at":      started_at.isoformat(),
+                "finished_at":     finished_at.isoformat(),
                 "elapsed_seconds": elapsed,
-                "domains_run": to_run,
-                "results": summaries,
+                "domains_run":     to_run,
+                "results":         summaries,
             },
         )
     except Exception as e:
@@ -273,11 +264,10 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
 
-    config = load_config(settings_path=args.config)
+    config  = load_config(settings_path=args.config)
     domains = [args.domain] if args.domain else None
 
     summaries = run_processing(domains=domains, config=config)
 
-    # Exit with error code if any domain failed
     any_failed = any(s["status"] == "error" for s in summaries)
     sys.exit(1 if any_failed else 0)

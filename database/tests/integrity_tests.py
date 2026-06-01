@@ -45,7 +45,7 @@ import duckdb
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from ingestion.loaders.base_loader import get_logger, load_config
-from ingestion.loaders.sharepoint_loader import database_path
+from ingestion.loaders.gcs_uploader import database_path
 
 logger = get_logger("database.tests")
 

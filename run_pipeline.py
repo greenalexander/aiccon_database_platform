@@ -7,20 +7,19 @@ Single entry point for the full aiccon-data pipeline.
 
   ingest   Calls the API fetcher scripts for each domain. Downloads fresh
            data from Eurostat and ISTAT and writes raw parquet files to
-           SharePoint/aiccon-data/raw/{domain}/. Each file is date-stamped
-           so you accumulate monthly snapshots of the source data.
+           GCS: aiccon-data/raw/{domain}/. Each file is date-stamped so
+           you accumulate monthly snapshots of the source data.
 
-  process  Reads the raw parquet files, harmonises geography (NUTS codes),
-           legal forms, and NACE labels, merges sources with priority rules,
-           and writes a single cleaned parquet to
-           SharePoint/aiccon-data/processed/{domain}/. This is the step
-           that uses the mapping tables in processing/mappings/.
+  process  Reads the raw parquet files from GCS, harmonises geography
+           (NUTS codes), legal forms, and NACE labels, merges sources
+           with priority rules, and writes a single cleaned parquet to
+           GCS: aiccon-data/processed/{domain}/. This is the step that
+           uses the mapping tables in processing/mappings/.
 
-  database Reads the processed parquet files and builds the DuckDB star
-           schema: creates dimension and fact tables, resolves surrogate
-           keys, creates the analytical views, and uploads the finished
-           aiccon.duckdb to SharePoint/aiccon-data/database/. This is
-           the file PowerBI connects to.
+  database Reads the processed parquet files from GCS and loads them into
+           BigQuery: creates dimension and fact tables, resolves surrogate
+           keys. This is the step that populates the tables PowerBI and
+           the NL query app connect to.
 
 ── When to run each stage ────────────────────────────────────────────────────
 
@@ -32,17 +31,17 @@ Single entry point for the full aiccon-data pipeline.
   without needing new data from the APIs:
       python run_pipeline.py --stage process
       python run_pipeline.py --stage database
-      Reuses the existing raw parquet files. No API calls made.
+      Reuses the existing raw parquet files in GCS. No API calls made.
 
   After fixing a bug in a merge script without changing mappings or data:
       python run_pipeline.py --stage database
-      Just rebuilds the DuckDB file from existing processed parquet.
+      Just reloads BigQuery from existing processed parquet in GCS.
       Takes seconds rather than minutes.
 
   When building and testing a new domain (e.g. immigration):
       python run_pipeline.py --domain immigration
       Runs all three stages for immigration only, leaving existing
-      social_economy and labour data untouched in SharePoint and in the database.
+      social_economy and labour data untouched in GCS and BigQuery.
 
   Debugging a specific stage for a specific domain:
       python run_pipeline.py --stage ingest --domain social_economy
@@ -54,10 +53,10 @@ Single entry point for the full aiccon-data pipeline.
   1. Read the terminal output — ERROR lines include the full Python
      traceback. This is usually enough to identify the problem.
 
-  2. Check pipeline_log.json in your SharePoint database/ folder.
-     It is a plain JSON file you can open in any text editor. It contains
-     a structured summary of every stage and domain — status, row counts,
-     error messages — from the most recent run.
+  2. Check pipeline_log.json in GCS aiccon-data/database/.
+     It is a plain JSON file. It contains a structured summary of every
+     stage and domain — status, row counts, error messages — from the
+     most recent run.
 
   3. Run the failing stage in isolation to reproduce with less noise:
          python run_pipeline.py --stage process --domain social_economy
@@ -81,7 +80,6 @@ Single entry point for the full aiccon-data pipeline.
       processing/pipeline.py                      ← add to DOMAIN_PROCESSORS
       database/build_db.py                        ← add to DOMAIN_LOADERS
       database/schema/fact_tables.sql             ← fill in stub table
-      database/schema/views.sql                   ← add domain views
       database/tests/test_integrity.py            ← fill in stub check
       config/settings.yaml                        ← set enabled: true
       processing/mappings/domain_sources.csv      ← add source rows
@@ -97,10 +95,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ingestion.loaders.base_loader import get_logger, load_config
-from ingestion.loaders.sharepoint_loader import (
-    check_sharepoint_available,
-    write_pipeline_log,
-)
+from ingestion.loaders.gcs_uploader import check_gcs_available, write_pipeline_log
 
 logger = get_logger("run_pipeline")
 
@@ -112,7 +107,7 @@ STAGES = ["ingest", "process", "database"]
 
 def run_ingest(domains: list[str] | None, config: dict) -> dict:
     """
-    Run the ingestion stage — fetch from APIs and write raw parquet files.
+    Run the ingestion stage — fetch from APIs and write raw parquet to GCS.
 
     ── How to add a new domain ───────────────────────────────────────────────
     Step 1: import the new loader classes at the top of this function,
@@ -136,25 +131,15 @@ def run_ingest(domains: list[str] | None, config: dict) -> dict:
     Some domains may only have one source (e.g. only ISTAT, no Eurostat):
 
         "welfare": [IstatWelfareLoader],
-
-    Some may have three or more if you add manual-source loaders later:
-
-        "social_economy": [EurostatSocialEconomyLoader,
-                           IstatSocialEconomyLoader,
-                           RuntsLoader],        # manual source loader
     """
-    # ── Active loader imports ─────────────────────────────────────────────────
     from ingestion.api_sources.social_economy.eurostat import EurostatSocialEconomyLoader
     from ingestion.api_sources.social_economy.istat   import IstatSocialEconomyLoader
-    from ingestion.api_sources.labour.eurostat_labour         import EurostatLabourLoader
-    from ingestion.api_sources.labour.istat_labour            import IstatLabourLoader
+    from ingestion.api_sources.labour.eurostat_labour  import EurostatLabourLoader
+    from ingestion.api_sources.labour.istat_labour     import IstatLabourLoader
 
-    # ── Domain registry ───────────────────────────────────────────────────────
-    # Maps domain name → list of loader classes to run for that domain.
-    # Add new domains here following the pattern above.
     DOMAIN_INGESTION_CLASSES: dict[str, list] = {
         "social_economy": [EurostatSocialEconomyLoader, IstatSocialEconomyLoader],
-        "labour":         [EurostatLabourLoader,  IstatLabourLoader],
+        "labour":         [EurostatLabourLoader, IstatLabourLoader],
 
         # Uncomment and complete when building each domain:
         # "immigration": [EurostatImmigrationLoader, IstatImmigrationLoader],
@@ -209,8 +194,8 @@ def run_process(domains: list[str] | None, config: dict) -> dict:
     """
     Run the processing stage via processing/pipeline.py.
 
-    Reads raw parquet from SharePoint, harmonises and merges,
-    writes processed parquet back to SharePoint.
+    Reads raw parquet from GCS, harmonises and merges,
+    writes processed parquet back to GCS.
     No API calls are made in this stage.
     """
     from processing.pipeline import run_processing
@@ -230,19 +215,17 @@ def run_database(domains: list[str] | None, config: dict) -> dict:
     """
     Run the database build stage via database/build_db.py.
 
-    Reads processed parquet from SharePoint, builds the DuckDB star schema,
-    and uploads aiccon.duckdb to SharePoint. No API calls or processing.
-    This is the fastest stage — usually takes under a minute.
+    Reads processed parquet from GCS and loads into BigQuery.
+    No API calls or processing. Usually the fastest stage.
     """
     from database.build_db import build_database
 
     started_at = datetime.now(timezone.utc)
     try:
-        dest = build_database(domains=domains, config=config)
+        build_database(domains=domains, config=config)
         return {
-            "status":      "complete",
-            "started_at":  started_at.isoformat(),
-            "output_path": str(dest),
+            "status":     "complete",
+            "started_at": started_at.isoformat(),
         }
     except Exception as e:
         logger.error(f"Database build failed: {e}", exc_info=True)
@@ -305,10 +288,10 @@ def run_pipeline(
     started_at    = datetime.now(timezone.utc)
     stage_results = {}
 
-    if not check_sharepoint_available(cfg, logger):
+    if not check_gcs_available(cfg, logger):
         logger.error(
-            "SharePoint synced folder is not reachable.\n"
-            "Check that OneDrive sync is running and SHAREPOINT_ROOT is set in .env"
+            "GCS bucket is not reachable.\n"
+            "Check that GOOGLE_APPLICATION_CREDENTIALS and GCS_BUCKET are set in .env"
         )
         return False
 
@@ -376,7 +359,7 @@ def parse_args() -> argparse.Namespace:
             "  python run_pipeline.py                           # full monthly run\n"
             "  python run_pipeline.py --stage ingest            # fetch from APIs only\n"
             "  python run_pipeline.py --stage process           # re-process existing raw files\n"
-            "  python run_pipeline.py --stage database          # rebuild DuckDB only\n"
+            "  python run_pipeline.py --stage database          # reload BigQuery only\n"
             "  python run_pipeline.py --domain social_economy   # one domain, all stages\n"
             "  python run_pipeline.py --stage process --domain social_economy"
         ),

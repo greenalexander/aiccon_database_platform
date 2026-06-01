@@ -1,15 +1,24 @@
 # aiccon-data configuration
-# All file paths use forward slashes. For the SharePoint synced folder,
-# set the root in .env as SHAREPOINT_ROOT and paths here are relative to it.
+# GCS paths are relative to the bucket root — set GCS_BUCKET, BQ_PROJECT,
+# and BQ_DATASET in .env. The prefix below is the top-level folder inside
+# the bucket.
 
-# ── SharePoint storage layout ─────────────────────────────────────────────────
-sharepoint:
-  # Subfolders under SHAREPOINT_ROOT (set in .env)
-  raw_dir: "aiccon-data/raw"           # one subfolder per domain, e.g. raw/social_economy/
-  processed_dir: "aiccon-data/processed"
-  database_dir: "aiccon-data/database"
-  database_filename: "aiccon.duckdb"
+# ── Google Cloud Storage layout ───────────────────────────────────────────────
+gcs:
+  # Top-level prefix inside the bucket (set GCS_BUCKET in .env)
+  prefix: "aiccon-data"
+  # Subfolders under prefix — one subfolder per domain within each layer
+  # e.g. aiccon-data/raw/social_economy/, aiccon-data/processed/labour/
+  raw_dir: "raw"
+  processed_dir: "processed"
+  database_dir: "database"
   log_filename: "pipeline_log.json"
+
+# ── BigQuery ──────────────────────────────────────────────────────────────────
+bigquery:
+  # Set BQ_PROJECT and BQ_DATASET in .env
+  # Table names within the dataset follow the pattern: fact_{domain}, dim_{dimension}
+  location: "us-central1"                    # must match the region of your GCS bucket
 
 # ── Active domains ────────────────────────────────────────────────────────────
 # Set enabled: false to skip a domain during pipeline runs
@@ -112,7 +121,7 @@ istat:
       label: "Monthly labour force survey"
       description: >
         Monthly data on the labour force by economic activity (NACE), gender, region.
-    # Statistics on NEETs (Not in Employment, Education or Training) 
+    # Statistics on NEETs (Not in Employment, Education or Training)
     - dataset: "DCCV_NEET1"
       label: "NEETs statistics"
       description: >
@@ -132,7 +141,6 @@ istat:
       label: "Employment rate"
       description: >
         Employment rate by economic activity (NACE), gender, region.
-        
 
 # ── Geography scope ───────────────────────────────────────────────────────────
 geography:
@@ -146,7 +154,7 @@ geography:
 
 # ── Pipeline behaviour ────────────────────────────────────────────────────────
 pipeline:
-  # If true, skip API fetch and re-use existing raw parquet files
+  # If true, skip API fetch and re-use existing raw parquet files in GCS
   use_cached_raw: false
   # How many years back to fetch (null = all available)
   max_years_back: null

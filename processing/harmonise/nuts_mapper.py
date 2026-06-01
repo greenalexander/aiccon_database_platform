@@ -6,6 +6,8 @@ Harmonises geographic codes from all data sources to a unified NUTS-based key.
 Sources use different geographic identifiers:
     - Eurostat : NUTS codes directly (IT, ITC4, ITC41, ...)
     - ISTAT    : own territorial codes (001, 01, ITA, ...) via ITTER107 dimension
+                 Some ISTAT datasets (notably the RFL labour series) use NUTS-style
+                 codes directly (ITC11, ITC12 ...) rather than numeric ISTAT codes.
 
 This module loads the nuts_istat.csv mapping table and provides functions
 to add a unified `nuts_code` and `nuts_level` column to any raw DataFrame.
@@ -14,7 +16,7 @@ Unmatched codes are flagged rather than silently dropped, so you can see
 what needs to be added to the mapping table.
 
 Eurostat already uses NUTS codes, so there's no lookup needed. The harmonise_eurostat_geo
-function still adds the standardised nuts_code, nuts_level, and country_code columns so 
+function still adds the standardised nuts_code, nuts_level, and country_code columns so
 the output schema is identical to the ISTAT path.
 """
 
@@ -48,7 +50,6 @@ def load_nuts_mapping(mappings_dir: Path | None = None) -> pd.DataFrame:
     """
     if mappings_dir is None:
         here = Path(__file__).resolve()
-        # Walk up to find processing/mappings/
         for parent in [here, *here.parents]:
             candidate = parent / "processing" / "mappings" / "nuts_istat.csv"
             if candidate.exists():
@@ -62,8 +63,6 @@ def load_nuts_mapping(mappings_dir: Path | None = None) -> pd.DataFrame:
 
     path = mappings_dir / "nuts_istat.csv"
     df = pd.read_csv(path, dtype=str)
-
-    # Strip whitespace that sometimes creeps into CSV editors
     df = df.apply(lambda col: col.str.strip() if col.dtype == object else col)
 
     logger.info(f"Loaded NUTS mapping: {len(df)} rows from {path}")
@@ -89,8 +88,8 @@ def harmonise_eurostat_geo(df: pd.DataFrame) -> pd.DataFrame:
     -------
     pd.DataFrame
         DataFrame with added columns:
-            nuts_code   — same as geo for Eurostat (already NUTS)
-            nuts_level  — 0, 1, 2, or 3 inferred from code length
+            nuts_code    — same as geo for Eurostat (already NUTS)
+            nuts_level   — 0, 1, 2, or 3 inferred from code length
             country_code — first two characters of geo (ISO 3166-1 alpha-2)
     """
     if "geo" not in df.columns:
@@ -100,11 +99,9 @@ def harmonise_eurostat_geo(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["nuts_code"] = df["geo"].str.strip().str.upper()
 
-    # NUTS level from code length: IT=2→0, ITC=3→1, ITC4=4→2, ITC41=5→3
     code_len = df["nuts_code"].str.len()
     df["nuts_level"] = code_len.map({2: 0, 3: 1, 4: 2, 5: 3})
 
-    # Flag codes that don't match any known NUTS length (e.g. "EA", "EU27_2020")
     non_nuts = df["nuts_level"].isna()
     if non_nuts.any():
         odd_codes = df.loc[non_nuts, "nuts_code"].unique().tolist()
@@ -132,12 +129,17 @@ def harmonise_istat_geo(
     ISTAT uses its own territorial codes (ITTER107 dimension), which this
     function maps to NUTS codes using the nuts_istat.csv mapping table.
 
+    Two lookup passes are attempted:
+        1. Primary:  match raw geo code against istat_code column in the mapping.
+                     This covers numeric codes like '001' (Torino), '01' (Piemonte).
+        2. Fallback: match raw geo code against nuts_code column in the mapping.
+                     This covers ISTAT labour (RFL) datasets that use NUTS-style
+                     codes directly, e.g. 'ITC11', 'ITH55', rather than numeric codes.
+
     Parameters
     ----------
     df : pd.DataFrame
-        Raw ISTAT DataFrame. The geographic column may be named 'geo',
-        'itter107', or 'territory' depending on the dataset — pass the
-        actual name as geo_col.
+        Raw ISTAT DataFrame.
     mapping : pd.DataFrame
         Loaded nuts_istat.csv mapping table (from load_nuts_mapping()).
     geo_col : str
@@ -156,7 +158,6 @@ def harmonise_istat_geo(
             geo_unmatched — True if the ISTAT code had no mapping (for QA)
     """
     if geo_col not in df.columns:
-        # Try common alternative column names
         for alt in ["itter107", "territory", "ref_area"]:
             if alt in df.columns:
                 geo_col = alt
@@ -170,30 +171,52 @@ def harmonise_istat_geo(
             return df
 
     df = df.copy()
-
-    # Normalise the ISTAT code — strip whitespace and uppercase
     raw_geo = df[geo_col].astype(str).str.strip().str.upper()
 
-    # Build lookup: istat_code (uppercased) → mapping row
-    lookup = mapping.copy()
-    lookup["istat_code_upper"] = lookup["istat_code"].str.upper()
-    lookup = lookup.set_index("istat_code_upper")
+    # ── Primary lookup: istat_code → nuts_code ────────────────────────────────
+    # Covers numeric ISTAT codes like '001', '037', 'ITA' (national)
+    lookup_by_istat = mapping.copy()
+    lookup_by_istat["_key"] = lookup_by_istat["istat_code"].str.upper()
+    lookup_by_istat = lookup_by_istat.dropna(subset=["_key"])
+    lookup_by_istat = lookup_by_istat.set_index("_key")
 
-    # Map each code
-    cols_to_add = ["nuts_code", "nuts_level", "nuts_name_it", "nuts_name_en",
-                   "region_name", "macro_area"]
+    # ── Fallback lookup: nuts_code → nuts_code (identity mapping) ────────────
+    # Covers RFL labour datasets that already use NUTS codes like 'ITC11', 'ITH55'
+    # Filter to rows with valid non-empty nuts_code and no semicolons
+    lookup_by_nuts = mapping.copy()
+    lookup_by_nuts["_key"] = lookup_by_nuts["nuts_code"].str.upper()
+    lookup_by_nuts = lookup_by_nuts[
+        lookup_by_nuts["_key"].notna() &
+        (lookup_by_nuts["_key"] != "") &
+        (~lookup_by_nuts["_key"].str.contains(";", na=False))
+    ]
+    lookup_by_nuts = lookup_by_nuts.drop_duplicates(subset=["_key"]).set_index("_key")
 
-    mapped = raw_geo.map(lookup["nuts_code"].to_dict())
-    df["nuts_code"] = mapped
-    df["nuts_level"] = raw_geo.map(lookup["nuts_level"].to_dict())
-    df["nuts_name_it"] = raw_geo.map(lookup["nuts_name_it"].to_dict())
-    df["nuts_name_en"] = raw_geo.map(lookup["nuts_name_en"].to_dict())
-    df["region_name"] = raw_geo.map(lookup["region_name"].to_dict())
-    df["macro_area"] = raw_geo.map(lookup["macro_area"].to_dict())
+    cols = ["nuts_code", "nuts_level", "nuts_name_it", "nuts_name_en",
+            "region_name", "macro_area"]
+
+    # Apply primary lookup
+    for col in cols:
+        df[col] = raw_geo.map(lookup_by_istat[col].to_dict() if col in lookup_by_istat.columns else {})
+
+    # Apply fallback for rows that didn't match the primary lookup
+    unmatched_mask = df["nuts_code"].isna()
+    if unmatched_mask.any():
+        for col in cols:
+            if col not in lookup_by_nuts.columns:
+                continue
+            fallback = raw_geo[unmatched_mask].map(lookup_by_nuts[col].to_dict())
+            df.loc[unmatched_mask, col] = fallback
+        n_recovered = (~df["nuts_code"].isna() & unmatched_mask).sum()
+        if n_recovered > 0:
+            logger.info(
+                f"harmonise_istat_geo: {n_recovered:,} rows matched via NUTS code "
+                "fallback lookup (RFL-style codes like ITC11, ITH55)."
+            )
+
     df["country_code"] = "IT"
     df["geo_unmatched"] = df["nuts_code"].isna()
 
-    # Report unmatched codes so the mapping table can be extended
     unmatched = df.loc[df["geo_unmatched"], geo_col].unique()
     if len(unmatched) > 0:
         logger.warning(
@@ -240,12 +263,6 @@ def harmonise_geo(
     -------
     pd.DataFrame
         DataFrame with standardised geo columns added.
-
-    Example
-    -------
-    >>> mapping = load_nuts_mapping()
-    >>> df_eurostat = harmonise_geo(df_raw, source="eurostat")
-    >>> df_istat = harmonise_geo(df_raw, source="istat", mapping=mapping)
     """
     if source == "eurostat":
         return harmonise_eurostat_geo(df)

@@ -1,30 +1,45 @@
+This project is under active development. The architecture diagram and stack table reflect the target state.
+
 # aiccon-data
 
-Contextual statistics platform for AICCON research and projects. Integrates European, national (Italy), and subnational data across the thematic areas of AICCON's work — social economy, welfare, immigration, social impact, and sustainable development — and makes them available through PowerBI dashboards.
+A contextual statistics platform for social economy research. Collects data from European and Italian public APIs, harmonises it into a unified star-schema database organised by thematic domain — social economy, labour market, welfare, immigration, poverty, SDGs, and housing — and serves it through PowerBI dashboards and a natural language query interface.
 
-Statistical context platform for AICCON research and projects. Collects data from European and Italian public APIs, harmonises it into a unified database divided into thematic (social economy, welfare, immigration, poverty, labour market, SDGs, and housing), and serves it to colleagues through PowerBI dashboards.
-
-Maintained by one person. Updated monthly via a local Python pipeline. Colleagues access the data through PowerBI only — no coding required on their end.
+The pipeline runs monthly on a schedule via GitHub Actions, writes intermediate artefacts to Google Cloud Storage, and loads the final dataset into BigQuery. An LLM-powered summary is generated automatically after each refresh. A Streamlit app allows natural language querying of the database via Gemini.
 
 ---
 
-## Purpose
+## Stack
 
-Researchers and project staff at AICCON regularly need statistical context for their work: size of the third sector in a given region, poverty rates, immigration flows, SDG indicator progress, social spending trends. This project collects that data from authoritative public sources, integrates it into a unified database keyed by geography and time, and surfaces it in PowerBI for filtering and exploration.
+| Layer | Technology | Why |
+|---|---|---|
+| Ingestion & processing | Python 3.11 | Mature SDMX/API client ecosystem; `pandas` and `pyarrow` for parquet |
+| Intermediate storage | Google Cloud Storage | Durable, versioned parquet staging between pipeline stages; free tier sufficient for this data volume |
+| Analytical database | BigQuery | Serverless, scalable, native PowerBI connector; SQL-compatible with DuckDB used in local dev |
+| Transformation layer | dbt (BigQuery adapter) | Declarative SQL models, built-in testing, auto-generated documentation; clean separation of raw → staging → mart |
+| Orchestration / CI/CD | GitHub Actions | Scheduled monthly runs, per-stage manual triggers, no infrastructure to manage |
+| GenAI summaries | Gemini API (gemini-1.5-flash) | Monthly plain-language digest generated automatically post-refresh; cost-free on free tier at this call volume |
+| NL query interface | Streamlit + Gemini | Text-to-SQL over the BigQuery schema; deployed on Streamlit Community Cloud |
+| Local development | DuckDB | Fast local iteration against parquet files without a cloud connection |
 
-A Python pipeline fetches data from Eurostat and ISTAT APIs, harmonises geographic codes (NUTS/ISTAT), legal form classifications, and indicator units, then loads everything into a DuckDB star schema. PowerBI connects to the resulting `.duckdb` file on SharePoint.
+---
+
+## Architecture
 
 ```
 APIs (Eurostat, ISTAT)
         ↓  ingest
-raw parquet files (SharePoint/aiccon-data/raw/)
+raw parquet files (GCS: aiccon-data/raw/)
         ↓  process
-processed parquet files (SharePoint/aiccon-data/processed/)
-        ↓  database
-aiccon.duckdb (SharePoint/aiccon-data/database/)
-        ↓
-PowerBI dashboards
+processed parquet files (GCS: aiccon-data/processed/)
+        ↓  dbt (staging → marts)
+BigQuery dataset (aiccon_data)
+        ↓                    ↓
+PowerBI dashboards     Streamlit NL query app
+                             ↓
+                    Gemini monthly summary
 ```
+
+GitHub Actions triggers the full pipeline on the first of each month, then calls the Gemini summary generation step. Individual stages can also be triggered manually via `workflow_dispatch`.
 
 ---
 
@@ -71,7 +86,7 @@ Manual files are stored in `ingestion/manual_sources/` and are **not committed t
 ## Repository structure
 
 ```
-aiccon-data/
+aiccon-data-platform/
 ├── ingestion/
 │   ├── api_sources/
 │   │   ├── social_economy/
@@ -82,7 +97,7 @@ aiccon-data/
 │   │       └── istat.py           fetches ISTAT labour market datasets (RFL)
 │   ├── loaders/
 │   │   ├── base_loader.py         shared base class, retry logic, parquet I/O
-│   │   └── sharepoint_uploader.py writes files to SharePoint synced folder
+│   │   └── gcs_uploader.py        writes raw and processed parquet to GCS
 │   └── manual_sources/            raw downloaded files — gitignored
 │
 ├── processing/
@@ -96,21 +111,43 @@ aiccon-data/
 │   │   ├── nuts_istat.csv         NUTS ↔ ISTAT territorial codes (all 107 provinces)
 │   │   ├── legal_form_map.csv     Italian legal forms ↔ unified categories ↔ NACE
 │   │   ├── nace_labels.csv        NACE Rev.2 codes with Italian/English labels
-│   │   ├── sdg_indicators.csv#   SDG goal+target <-> ISTAT/Eurostat indicator codes
+│   │   ├── sdg_indicators.csv     SDG goal+target ↔ ISTAT/Eurostat indicator codes
 │   │   └── domain_sources.csv     source registry with priority and coverage
-│   └── pipeline.py                orchestrates processing for all active domains
+│   └── pipeline.py                orchestrates ingestion and processing for all active domains
+│
+├── dbt/
+│   ├── models/
+│   │   ├── staging/               one model per raw source, light cleaning only
+│   │   └── marts/                 joined, business-logic models consumed by PowerBI and the query app
+│   ├── tests/                     dbt schema tests (not_null, unique, referential integrity)
+│   ├── dbt_project.yml
+│   └── profiles.yml.example       BigQuery connection template
 │
 ├── database/
 │   ├── schema/
 │   │   ├── dimensions.sql         shared dimension tables (geo, time, source, indicator)
 │   │   ├── fact_tables.sql        one fact table per domain, stubs for future domains
-│   │   └── views.sql              analytical views consumed by PowerBI
-│   ├── build_db.py                builds aiccon.duckdb from processed parquet
+│   │   └── views.sql              analytical views (legacy; superseded by dbt marts)
 │   └── tests/
 │       └── test_integrity.py      row counts, null checks, orphan key checks
 │
+├── genai/
+│   ├── summarise.py               generates monthly plain-language digest via Gemini
+│   └── prompts/
+│       └── monthly_summary.txt    prompt template for the summary generation step
+│
+├── query_app/
+│   ├── app.py                     Streamlit NL query interface
+│   ├── sql_generator.py           text-to-SQL via Gemini with schema injection
+│   └── query_handler.py           BigQuery execution, error handling, result formatting
+│
+├── .github/
+│   └── workflows/
+│       ├── monthly_pipeline.yml   scheduled full run (1st of month) + summary generation
+│       └── manual_pipeline.yml    workflow_dispatch with stage and domain inputs
+│
 ├── config/
-│   ├── settings.yaml              SharePoint paths, active domains, API scope
+│   ├── settings.yaml              GCS paths, BigQuery dataset, active domains, API scope
 │   └── .env.example               credential template (copy to .env)
 │
 ├── docs/
@@ -119,7 +156,7 @@ aiccon-data/
 │   ├── decisions.md               architectural and data decisions with rationale
 │   └── maintenance.md             how to add new domains
 │
-├── run_pipeline.py           # Entry point: ingest -> process -> build database
+├── run_pipeline.py                entry point: ingest → process → dbt run → integrity checks
 ├── requirements.txt
 ├── .gitignore
 └── README.md
@@ -129,16 +166,26 @@ aiccon-data/
 
 ## Setup
 
-**Requirements**: Python 3.11+, OneDrive sync client running
+**Requirements**: Python 3.11+, Google Cloud SDK, dbt-bigquery
 
 ```bash
-git clone 
+git clone <repo-url>
 cd aiccon-data
 pip install -r requirements.txt
 cp config/.env.example config/.env
 ```
 
-Edit `config/.env` and set `SHAREPOINT_ROOT` to the full path of your SharePoint synced folder.
+**GCP credentials**: The pipeline authenticates via a service account. For local development, download the service account key JSON and set:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+```
+
+In GitHub Actions, credentials are stored as a repository secret (`GCP_SA_KEY`) and injected at runtime — no key files are committed.
+
+Edit `config/.env` and set `GCS_BUCKET`, `BQ_PROJECT`, and `BQ_DATASET` to your GCP resource names.
+
+**dbt**: Copy `dbt/profiles.yml.example` to `~/.dbt/profiles.yml` and fill in your BigQuery project details.
 
 ---
 
@@ -148,11 +195,12 @@ Edit `config/.env` and set `SHAREPOINT_ROOT` to the full path of your SharePoint
 ```bash
 python run_pipeline.py
 ```
+
 **Single stage**:
 ```bash
-python run_pipeline.py --stage ingest     # fetch from APIs only
+python run_pipeline.py --stage ingest     # fetch from APIs, write raw parquet to GCS
 python run_pipeline.py --stage process    # re-process existing raw files
-python run_pipeline.py --stage database   # rebuild DuckDB only (fastest)
+python run_pipeline.py --stage database   # run dbt models only (fastest)
 ```
 
 **Single domain** (useful when building or debugging a new domain):
@@ -160,7 +208,12 @@ python run_pipeline.py --stage database   # rebuild DuckDB only (fastest)
 python run_pipeline.py --domain social_economy
 ```
 
-**Integrity checks** (run after every build):
+**Generate monthly summary only**:
+```bash
+python genai/summarise.py
+```
+
+**Integrity checks** (run after every pipeline execution):
 ```bash
 python -m database.tests.test_integrity
 ```
@@ -171,16 +224,16 @@ python -m database.tests.test_integrity
 |---|---|
 | Monthly update | `python run_pipeline.py` |
 | Fixed a mapping CSV, no new data | `python run_pipeline.py --stage process` then `--stage database` |
-| Fixed a bug in a merge script | `python run_pipeline.py --stage database` |
+| Fixed a bug in a dbt model | `python run_pipeline.py --stage database` |
 | Building a new domain | `python run_pipeline.py --domain {new_domain}` |
 
 ### Debugging failures
 
 1. Read terminal output — `ERROR` lines include the full Python traceback
-2. Check `pipeline_log.json` in SharePoint `database/` folder for a structured JSON summary
+2. Check `pipeline_log.json` in GCS `aiccon-data/database/` for a structured JSON summary
 3. Run the failing stage in isolation: `python run_pipeline.py --stage process --domain social_economy`
-4. Run individual scripts directly for maximum detail:
-   `python -m ingestion.api_sources.social_economy.istat`
+4. Run individual scripts directly for maximum detail: `python -m ingestion.api_sources.social_economy.istat`
+5. For dbt failures: `dbt run --select <model_name>` and check `dbt/logs/dbt.log`
 
 ---
 
@@ -208,33 +261,62 @@ python -m database.tests.test_integrity
 | `fact_sdg` | 🔲 Stub | `sdg_goal`, `sdg_target` |
 | `fact_housing` | 🔲 Stub | `tenure_type` |
 
-### PowerBI views
+### dbt marts (PowerBI and query app connect to these)
 
-Connect PowerBI to these views rather than the raw fact tables.
+dbt staging models clean and type-cast raw BigQuery tables. Mart models join dimensions to fact tables and apply business logic. Run `dbt docs generate && dbt docs serve` for full interactive documentation.
 
-**Social economy:**
+**Social economy marts:**
 
-| View | Description |
+| Model | Description |
 |---|---|
-| `vw_social_economy` | Full flat view — primary PowerBI source for social economy |
-| `vw_se_volunteering_national` | National volunteering rates by year — line charts |
-| `vw_se_volunteering_regional` | Regional volunteering rates — map visuals |
-| `vw_se_associationism_national` | Association membership rates by demographic |
-| `vw_se_employment_eu` | EU employment comparison by NACE |
-| `vw_se_local_units_regional` | Local units by NACE and region — density maps |
+| `mart_social_economy` | Full flat model — primary PowerBI source for social economy |
+| `mart_se_volunteering_national` | National volunteering rates by year |
+| `mart_se_volunteering_regional` | Regional volunteering rates |
+| `mart_se_associationism_national` | Association membership rates by demographic |
+| `mart_se_employment_eu` | EU employment comparison by NACE |
+| `mart_se_local_units_regional` | Local units by NACE and region |
 
-**Labour:**
+**Labour marts:**
 
-| View | Description |
+| Model | Description |
 |---|---|
-| `vw_labour` | Full flat view — primary PowerBI source for labour |
-| `vw_labour_rates_italy` | Employment, unemployment and inactivity rates for Italy (national, annual) — line charts |
-| `vw_labour_rates_regional` | Employment and unemployment rates at NUTS2/NUTS3 for Italy — map visuals |
-| `vw_labour_neet` | NEET rate by region, age and citizenship |
-| `vw_labour_employment_by_nace` | Employed persons by economic activity across EU — sector comparison |
-| `vw_labour_unemployment_by_education` | Unemployment rate by education level — Italy and EU |
-| `vw_labour_employment_edu_citizenship` | Employment rate by education × citizenship — Italy and EU |
-| `vw_labour_force_monthly` | Monthly labour force headcount for Italy — use `period_label` as x-axis |
+| `mart_labour` | Full flat model — primary PowerBI source for labour |
+| `mart_labour_rates_italy` | Employment, unemployment and inactivity rates for Italy (national, annual) |
+| `mart_labour_rates_regional` | Employment and unemployment rates at NUTS2/NUTS3 for Italy |
+| `mart_labour_neet` | NEET rate by region, age and citizenship |
+| `mart_labour_employment_by_nace` | Employed persons by economic activity across EU |
+| `mart_labour_unemployment_by_education` | Unemployment rate by education level — Italy and EU |
+| `mart_labour_employment_edu_citizenship` | Employment rate by education × citizenship |
+| `mart_labour_force_monthly` | Monthly labour force headcount for Italy |
+
+---
+
+## GenAI monthly summary
+
+After each pipeline run, `genai/summarise.py` queries the BigQuery mart tables for the most recently updated indicators and sends them to Gemini with a structured prompt. The output is a plain-language summary of what changed in the latest data refresh — new data points, notable trends, any source issues flagged during ingestion.
+
+The summary is written to GCS (`aiccon-data/summaries/YYYY-MM.md`) and printed to the GitHub Actions run log.
+
+---
+
+## Natural language query interface
+
+The Streamlit app at `query_app/app.py` allows plain-language querying of the BigQuery database. The flow is:
+
+1. User enters a question in natural language
+2. The BigQuery schema (table names, column names, descriptions from `docs/data_dictionary.md`) is injected into a Gemini prompt
+3. Gemini returns a SQL query
+4. The query is validated (table/column names checked against the schema before execution) and run against BigQuery
+5. Results are displayed as a table, with the generated SQL shown beneath for transparency
+
+Ambiguous queries (references to undefined geographies, unmapped indicator names) are caught at the validation step and returned to the user with a clarifying prompt rather than executed.
+
+Deploy locally:
+```bash
+streamlit run query_app/app.py
+```
+
+Or via Streamlit Community Cloud (free tier) — connect the GitHub repo and set GCP credentials as Streamlit secrets.
 
 ---
 
@@ -251,12 +333,11 @@ The social economy and labour domains are the templates. For each new domain:
 3. **Register in four places**:
    - `run_pipeline.py` → add loader classes to `DOMAIN_INGESTION_CLASSES`
    - `processing/pipeline.py` → add to `DOMAIN_PROCESSORS`
-   - `database/build_db.py` → add to `DOMAIN_LOADERS`
+   - `dbt/models/` → add staging and mart models
    - `config/settings.yaml` → set `enabled: true`
 
 4. **Fill in the stubs**:
    - `database/schema/fact_tables.sql` → replace `-- TODO` with actual columns
-   - `database/schema/views.sql` → add base view and summary views
    - `database/tests/test_integrity.py` → fill in the stub check function
 
 5. **Update the mappings**:
@@ -264,7 +345,7 @@ The social economy and labour domains are the templates. For each new domain:
    - `processing/mappings/nace_labels.csv` → add any new NACE codes if needed
 
 6. **Document**:
-   - `docs/data_dictionary.md` → add fact table field definitions and caveats
+   - `docs/data_dictionary.md` → add fact table field definitions (also used by the NL query app for schema injection)
    - `docs/source_log.md` → add dataset codes, fetch dates, and known issues
    - `docs/decisions.md` → log any non-obvious choices
 
@@ -278,14 +359,25 @@ The social economy and labour domains are the templates. For each new domain:
 
 - **NEET series starts 2018**: Both ISTAT NEET datasets begin in 2018. There is no comparable regional NEET series from 2015 like the other RFL datasets.
 
-- **RUNTS, Registro Imprese, Agenzia delle Entrate** are not API-integratable. They require manual downloading of data and integration.
+- **RUNTS, Registro Imprese, Agenzia delle Entrate** are not API-integratable. They require manual downloading and integration.
 
-- **Single-writer database**: DuckDB does not support concurrent writes. This is not a current issue (one maintainer, monthly batch updates) but would need to change if the project moves to multi-user cloud execution.
+- **BigQuery free tier**: The project is designed to stay within BigQuery's free tier (10 GB storage, 1 TB queries/month). The NL query interface validates and limits queries before execution to avoid unexpectedly large scans.
 
----
 
-## Maintainer
 
-**[Alexander Patrick Green]** — AICCON
-Last pipeline run: see SharePoint `aiccon-data/database/pipeline_log.json`
-Contact: [alexander.green@aiccon.it]
+
+
+Run a single domain in isolation: python run_pipeline.py --stage ingest --domain social_economy
+Check GCS to confirm parquet files landed in the right folders
+Check the filenames - see if they include datetime stamps. 
+Run --stage database and check BigQuery tables exist and have rows
+
+Only then run the full pipeline
+
+1. Delete the BigQuery current facts tables for social economy and labour. (It is appending to past versions)
+2. Rerun the --stage process --domain labour. (check for provincial data warnings)
+3. Rerun the --stage database
+
+Identify how to connect PowerBI to BigQuery database.
+Identify how to update integrity_tests.py (or maybe the step is to set up tests within GC, Bigquery or storage? I don't know).
+Then after these things we move towards the CICD with GitActions.

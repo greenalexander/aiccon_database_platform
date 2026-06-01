@@ -1,6 +1,9 @@
 # ── Credentials and environment ──────────────────────────────────────────────
 .env
 *.env
+*.json
+service-account*.json
+
  
 # ── Manual source data (raw downloads — never commit) ────────────────────────
 ingestion/manual_sources/**/*
