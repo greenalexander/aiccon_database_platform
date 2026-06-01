@@ -1,0 +1,22 @@
+source_system,source_code,source_label_it,source_label_en,unified_category,unified_category_en,nace_primary,nace_secondary,ets_classification,notes
+istat,COOP_SOC_A,Cooperativa sociale tipo A,Social cooperative type A,cooperativa_sociale,Social cooperative,Q87;Q88,Q86,ets,"Provides social/health services. Maps to NACE Q (health and social work)."
+istat,COOP_SOC_B,Cooperativa sociale tipo B,Social cooperative type B,cooperativa_sociale,Social cooperative,Q87;Q88,C;F;N,ets,"Work integration. Primary NACE Q for classification; secondary varies by actual activity."
+istat,COOP_SOC_C,Cooperativa sociale consortile,Social cooperative consortium,cooperativa_sociale,Social cooperative,Q87;Q88,,ets,"Consortia of type A and/or B cooperatives."
+istat,ODV,Organizzazione di Volontariato,Voluntary organisation,odv,Voluntary organisation,Q88;S94,,ets,"Registered under Codice del Terzo Settore art. 32."
+istat,APS,Associazione di Promozione Sociale,Social promotion association,aps,Social promotion association,S94;Q88,,ets,"Registered under Codice del Terzo Settore art. 35."
+istat,FOND_ETS,Fondazione ETS,Foundation (third sector),fondazione,Foundation,various,,ets,"Foundations registered in RUNTS."
+istat,FOND_OTHER,Fondazione non ETS,Foundation (non-ETS),fondazione,Foundation,various,,non_ets,"Foundations not registered as ETS."
+istat,ASSOC_RIC,Associazione riconosciuta,Recognised association,associazione,Association,S94,,ets_eligible,"Has legal personality. May or may not be ETS-registered."
+istat,ASSOC_NON_RIC,Associazione non riconosciuta,Unrecognised association,associazione,Association,S94,,non_ets,"No legal personality. Cannot register as ETS."
+istat,ENTE_ECC,Ente ecclesiastico,Religious body,ente_religioso,Religious body,Q87;Q88;P,,ets_eligible,"Can register as ETS if it carries out activities of general interest."
+istat,ALTRO,Altro ente non profit,Other nonprofit,altro_nonprofit,Other nonprofit,various,,,
+runts,ODV,Organizzazione di Volontariato,Voluntary organisation,odv,Voluntary organisation,Q88;S94,,ets,"RUNTS section A."
+runts,APS,Associazione di Promozione Sociale,Social promotion association,aps,Social promotion association,S94;Q88,,ets,"RUNTS section B."
+runts,ETS_ALTRO,Ente del Terzo Settore (altro),Other third sector entity,altro_ets,Other third sector entity,various,,ets,"RUNTS sections C-G."
+runts,FOND_ETS,Fondazione ETS,Foundation (third sector),fondazione,Foundation,various,,ets,"RUNTS section D."
+runts,ENTE_FILANTROPICO,Ente filantropico,Philanthropic entity,fondazione,Foundation,various,,ets,"RUNTS section E."
+runts,RETE_ASSOC,Rete associativa,Associative network,rete_associativa,Associative network,S94,,ets,"RUNTS section F — umbrella networks."
+runts,SOCIETA_MUTUO_SOCCORSO,Società di mutuo soccorso,Mutual aid society,mutuo_soccorso,Mutual aid society,S94,,ets,"RUNTS section G."
+eurostat,SOC_ECON,Social economy entity,Social economy entity,terzo_settore,Third sector,various,,,Eurostat social economy satellite account aggregate — no sub-classification.
+camere_commercio,COOP_SOC,Cooperativa sociale,Social cooperative,cooperativa_sociale,Social cooperative,Q87;Q88,,ets,"As classified in Registro Imprese."
+camere_commercio,COOP_OTHER,Altra cooperativa,Other cooperative,altra_cooperativa,Other cooperative,various,,non_ets,"Non-social cooperatives — included for context."

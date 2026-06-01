@@ -1,0 +1,22 @@
+# aiccon-data dependencies
+# Install with: pip install -r requirements.txt
+ 
+# Data handling
+pandas>=2.2
+pyarrow>=15.0          # parquet read/write
+duckdb>=0.10
+ 
+# HTTP and APIs
+requests>=2.31
+httpx>=0.27            # async-capable alternative used in some loaders
+ 
+# Data validation
+pandera>=0.18
+ 
+# Configuration
+python-dotenv>=1.0
+pyyaml>=6.0
+ 
+# Utilities
+tqdm>=4.66             # progress bars for long API fetches
+tenacity>=8.3          # retry logic for API calls

@@ -1,0 +1,138 @@
+nace_code,level,parent_code,label_it,label_en,social_economy_relevant,relevance_note
+P,section,,Istruzione,Education,TRUE,Core social economy sector — education activities
+P85,division,P,Istruzione,Education,TRUE,
+P85_1,group,P85,Istruzione prescolastica,Pre-primary education,TRUE,
+P85_2,group,P85,Istruzione primaria,Primary education,TRUE,
+P85_3,group,P85,Istruzione secondaria di primo grado,Lower secondary education,TRUE,
+P85_4,group,P85,Istruzione secondaria di secondo grado,Upper secondary education,TRUE,
+P85_5,group,P85,Istruzione post-secondaria non terziaria,Post-secondary non-tertiary education,TRUE,
+P85_6,group,P85,Istruzione terziaria,Tertiary education,TRUE,
+P85_9,group,P85,Altre forme di istruzione,Other education,TRUE,"Includes music schools, driving schools"
+Q,section,,Sanità e assistenza sociale,Human health and social work activities,TRUE,Core social economy sector
+Q86,division,Q,Assistenza sanitaria,Human health activities,TRUE,
+Q86_1,group,Q86,Servizi ospedalieri,Hospital activities,TRUE,
+Q86_2,group,Q86,Attività mediche e odontoiatriche,Medical and dental practice activities,TRUE,
+Q86_9,group,Q86,Altre attività di assistenza sanitaria,Other human health activities,TRUE,
+Q87,division,Q,Servizi di assistenza sociale con alloggio,Residential care activities,TRUE,Primary NACE for cooperative sociali tipo A
+Q87_1,group,Q87,Assistenza infermieristica con alloggio,Residential nursing care activities,TRUE,
+Q87_2,group,Q87,Assistenza ai disabili mentali e tossicodipendenti,Residential care for mental retardation/substance abuse,TRUE,
+Q87_3,group,Q87,Assistenza agli anziani e ai disabili,Residential care for the elderly and disabled,TRUE,
+Q87_9,group,Q87,Altre strutture di assistenza sociale con alloggio,Other residential care activities,TRUE,
+Q88,division,Q,Assistenza sociale senza alloggio,Social work activities without accommodation,TRUE,Primary NACE for cooperative sociali tipo A and ODV/APS
+Q88_1,group,Q88,Assistenza sociale senza alloggio per anziani e disabili,Social work for elderly and disabled without accommodation,TRUE,
+Q88_9,group,Q88,Altre forme di assistenza sociale senza alloggio,Other social work without accommodation,TRUE,Includes child day care — relevant for ETS
+S94,division,S,Attività di organizzazioni associative,Activities of membership organisations,TRUE,Core social economy sector — ODV APS associations
+S94_1,group,S94,Attività di organizzazioni economiche e datoriali,Activities of business/employers membership organisations,FALSE,Not typically third sector
+S94_11,group,S94_1,Attività di organizzazioni economiche e datoriali,Business and employers membership organisations,FALSE,
+S94_12,group,S94_1,Attività di organizzazioni professionali,Professional membership organisations,FALSE,
+S94_2,group,S94,Attività di sindacati,Activities of trade unions,FALSE,Trade unions — excluded from ETS scope
+S94_9,group,S94,Attività di altre organizzazioni associative,Activities of other membership organisations,TRUE,Includes cultural religious civic associations — core third sector
+S94_91,group,S94_9,Attività di organizzazioni religiose,Activities of religious organisations,TRUE,Can register as ETS
+S94_92,group,S94_9,Attività di organizzazioni politiche,Activities of political organisations,FALSE,Excluded from ETS
+S94_99,group,S94_9,Attività di altre organizzazioni associative nca,Activities of other membership organisations nec,TRUE,Residual — includes many ODV and APS
+S96,division,S,Altre attività di servizi per la persona,Other personal service activities,TRUE,Included in sbs_r_nuts2021 fetch — covers personal services often delivered by social enterprises and cooperatives
+R90,division,R,Attività creative artistiche e di intrattenimento,Creative arts and entertainment activities,FALSE,Included only when linked to ETS cultural activities
+R91,division,R,Attività di biblioteche archivi musei,Libraries archives museums and other cultural activities,TRUE,Relevant for cultural ETS — fondazioni culturali
+S95,division,S,Riparazione di computer e beni personali,Repair of computers and personal and household goods,FALSE,Not relevant
+O84,division,O,Pubblica amministrazione e difesa,Public administration and defence,FALSE,Public sector — excluded from social economy scope
+O-U,aggregate,,Pubblica amm. istruzione sanità e altri servizi,Public admin education health and other services,partial,Eurostat nama_10r_3empers aggregate — contains P Q and S94 but not separable at NUTS2
+TOTAL,aggregate,,Tutte le attività economiche,Total - all NACE activities,partial,Aggregate used in lfsa_egan22d for economy-wide totals
+A,section,,Agricoltura silvicoltura e pesca,Agriculture forestry and fishing,FALSE,Not relevant to social economy
+A01,division,A,Coltivazioni agricole e allevamento,Crop and animal production hunting and related service activities,FALSE,
+A02,division,A,Silvicoltura e utilizzo di aree forestali,Forestry and logging,FALSE,
+A03,division,A,Pesca e acquacoltura,Fishing and aquaculture,FALSE,
+B,section,,Estrazione di minerali,Mining and quarrying,FALSE,
+B05,division,B,Estrazione di carbone,Mining of coal and lignite,FALSE,
+B06,division,B,Estrazione di petrolio e gas,Extraction of crude petroleum and natural gas,FALSE,
+B07,division,B,Estrazione di minerali metalliferi,Mining of metal ores,FALSE,
+B08,division,B,Altre attività estrattive,Other mining and quarrying,FALSE,
+B09,division,B,Servizi di supporto all'estrazione,Mining support service activities,FALSE,
+C,section,,Attività manifatturiere,Manufacturing,FALSE,
+C10,division,C,Industrie alimentari,Manufacture of food products,FALSE,
+C11,division,C,Industria delle bevande,Manufacture of beverages,FALSE,
+C12,division,C,Industria del tabacco,Manufacture of tobacco products,FALSE,
+C13,division,C,Industrie tessili,Manufacture of textiles,FALSE,
+C14,division,C,Confezione di articoli di abbigliamento,Manufacture of wearing apparel,FALSE,
+C15,division,C,Fabbricazione di articoli in pelle,Manufacture of leather and related products,FALSE,
+C16,division,C,Industria del legno,Manufacture of wood and wood products,FALSE,
+C17,division,C,Fabbricazione di carta,Manufacture of paper and paper products,FALSE,
+C18,division,C,Stampa e riproduzione di supporti registrati,Printing and reproduction of recorded media,FALSE,
+C19,division,C,Fabbricazione di coke e prodotti petroliferi,Manufacture of coke and refined petroleum products,FALSE,
+C20,division,C,Fabbricazione di prodotti chimici,Manufacture of chemicals and chemical products,FALSE,
+C21,division,C,Fabbricazione di prodotti farmaceutici,Manufacture of basic pharmaceutical products,FALSE,
+C22,division,C,Fabbricazione di articoli in gomma e plastica,Manufacture of rubber and plastic products,FALSE,
+C23,division,C,Fabbricazione di altri prodotti non metallici,Manufacture of other non-metallic mineral products,FALSE,
+C24,division,C,Metallurgia,Manufacture of basic metals,FALSE,
+C25,division,C,Fabbricazione di prodotti in metallo,Manufacture of fabricated metal products,FALSE,
+C26,division,C,Fabbricazione di computer e prodotti elettronici,Manufacture of computer electronic and optical products,FALSE,
+C27,division,C,Fabbricazione di apparecchiature elettriche,Manufacture of electrical equipment,FALSE,
+C28,division,C,Fabbricazione di macchinari,Manufacture of machinery and equipment nec,FALSE,
+C29,division,C,Fabbricazione di autoveicoli,Manufacture of motor vehicles trailers and semi-trailers,FALSE,
+C30,division,C,Fabbricazione di altri mezzi di trasporto,Manufacture of other transport equipment,FALSE,
+C31,division,C,Fabbricazione di mobili,Manufacture of furniture,FALSE,
+C32,division,C,Altre industrie manifatturiere,Other manufacturing,FALSE,
+C33,division,C,Riparazione e installazione di macchine,Repair and installation of machinery and equipment,FALSE,
+D,section,,Fornitura di energia elettrica gas vapore,Electricity gas steam and air conditioning supply,FALSE,
+D35,division,D,Fornitura di energia elettrica gas vapore e aria condizionata,Electricity gas steam and air conditioning supply,FALSE,
+E,section,,Fornitura di acqua reti fognarie gestione rifiuti,Water supply sewerage waste management,FALSE,
+E36,division,E,Raccolta trattamento e fornitura di acqua,Water collection treatment and supply,FALSE,
+E37,division,E,Gestione delle reti fognarie,Sewerage,FALSE,
+E38,division,E,Raccolta trattamento e smaltimento rifiuti,Waste collection treatment and disposal activities,FALSE,
+E39,division,E,Attività di risanamento,Remediation activities and other waste management services,FALSE,
+F,section,,Costruzioni,Construction,FALSE,
+F41,division,F,Costruzione di edifici,Construction of buildings,FALSE,
+F42,division,F,Ingegneria civile,Civil engineering,FALSE,
+F43,division,F,Lavori di costruzione specializzati,Specialised construction activities,FALSE,
+G,section,,Commercio all'ingrosso e al dettaglio,Wholesale and retail trade repair of motor vehicles,FALSE,
+G45,division,G,Commercio e riparazione di autoveicoli,Wholesale and retail trade and repair of motor vehicles,FALSE,
+G46,division,G,Commercio all'ingrosso,Wholesale trade except of motor vehicles,FALSE,
+G47,division,G,Commercio al dettaglio,Retail trade except of motor vehicles,FALSE,
+H,section,,Trasporto e magazzinaggio,Transportation and storage,FALSE,
+H49,division,H,Trasporto terrestre e trasporto mediante condotte,Land transport and transport via pipelines,FALSE,
+H50,division,H,Trasporto marittimo e per vie d'acqua,Water transport,FALSE,
+H51,division,H,Trasporto aereo,Air transport,FALSE,
+H52,division,H,Magazzinaggio e attività di supporto ai trasporti,Warehousing and support activities for transportation,FALSE,
+H53,division,H,Attività postali e di corriere,Postal and courier activities,FALSE,
+I,section,,Attività dei servizi di alloggio e di ristorazione,Accommodation and food service activities,FALSE,
+I55,division,I,Alloggio,Accommodation,FALSE,
+I56,division,I,Attività di servizi di ristorazione,Food and beverage service activities,FALSE,
+J,section,,Servizi di informazione e comunicazione,Information and communication,FALSE,
+J58,division,J,Attività editoriali,Publishing activities,FALSE,
+J59,division,J,Produzione di film e programmi televisivi,Motion picture video and television programme production,FALSE,
+J60,division,J,Attività di programmazione e trasmissione,Programming and broadcasting activities,FALSE,
+J61,division,J,Telecomunicazioni,Telecommunications,FALSE,
+J62,division,J,Produzione di software e consulenza informatica,Computer programming consultancy and related activities,FALSE,
+J63,division,J,Attività dei servizi di informazione,Information service activities,FALSE,
+K,section,,Attività finanziarie e assicurative,Financial and insurance activities,FALSE,
+K64,division,K,Attività di servizi finanziari,Financial service activities except insurance and pension funding,FALSE,
+K65,division,K,Assicurazioni e fondi pensione,Insurance reinsurance and pension funding,FALSE,
+K66,division,K,Attività ausiliarie ai servizi finanziari,Activities auxiliary to financial services and insurance,FALSE,
+L,section,,Attività immobiliari,Real estate activities,FALSE,
+L68,division,L,Attività immobiliari,Real estate activities,FALSE,
+M,section,,Attività professionali scientifiche e tecniche,Professional scientific and technical activities,FALSE,
+M69,division,M,Attività legali e contabilità,Legal and accounting activities,FALSE,
+M70,division,M,Attività di direzione aziendale e di consulenza gestionale,Activities of head offices management consultancy,FALSE,
+M71,division,M,Attività degli studi di architettura e ingegneria,Architectural and engineering activities,FALSE,
+M72,division,M,Ricerca scientifica e sviluppo,Scientific research and development,FALSE,
+M73,division,M,Pubblicità e ricerche di mercato,Advertising and market research,FALSE,
+M74,division,M,Altre attività professionali scientifiche e tecniche,Other professional scientific and technical activities,FALSE,
+M75,division,M,Servizi veterinari,Veterinary activities,FALSE,
+N,section,,Noleggio agenzie di viaggio servizi di supporto,Administrative and support service activities,FALSE,
+N77,division,N,Attività di noleggio e leasing,Rental and leasing activities,FALSE,
+N78,division,N,Attività di ricerca selezione e fornitura di personale,Employment activities,FALSE,
+N79,division,N,Attività dei servizi delle agenzie di viaggio,Travel agency tour operator and related activities,FALSE,
+N80,division,N,Servizi di vigilanza e investigazione,Security and investigation activities,FALSE,
+N81,division,N,Servizi per edifici e paesaggio,Services to buildings and landscape activities,FALSE,
+N82,division,N,Attività di supporto per le funzioni d'ufficio,Office administrative office support and other business support,FALSE,
+O,section,,Amministrazione pubblica e difesa,Public administration and defence compulsory social security,FALSE,Public sector — excluded from social economy scope
+R,section,,Attività artistiche di intrattenimento e divertimento,Arts entertainment and recreation,partial,Partially relevant — R91 (museums/libraries) included; R90 R92 context-dependent
+R92,division,R,Attività riguardanti le lotterie,Gambling and betting activities,FALSE,
+R93,division,R,Attività sportive di intrattenimento e divertimento,Sports activities and amusement and recreation activities,FALSE,Included as context — some sports clubs are ETS-eligible
+S,section,,Altre attività di servizi,Other service activities,partial,S94 and S96 relevant to social economy
+T,section,,Attività di famiglie e convivenze come datori di lavoro,Activities of households as employers,FALSE,
+T97,division,T,Attività di famiglie come datori di lavoro di personale domestico,Activities of households as employers of domestic personnel,FALSE,
+T98,division,T,Produzione di beni e servizi non differenziati da famiglie,Undifferentiated goods and services-producing activities of private households,FALSE,
+U,section,,Organizzazioni ed organismi extraterritoriali,Activities of extraterritorial organisations and bodies,FALSE,
+U99,division,U,Organizzazioni ed organismi extraterritoriali,Activities of extraterritorial organisations and bodies,FALSE,
+NRP,other,,Nessuna risposta,No response,FALSE,LFS survey non-response code — not a real NACE category
+UNK,other,,Attività NACE sconosciuta,Unknown NACE activity,FALSE,LFS survey unknown code — not a real NACE category

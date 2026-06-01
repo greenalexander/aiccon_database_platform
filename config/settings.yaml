@@ -1,0 +1,154 @@
+# aiccon-data configuration
+# All file paths use forward slashes. For the SharePoint synced folder,
+# set the root in .env as SHAREPOINT_ROOT and paths here are relative to it.
+
+# ── SharePoint storage layout ─────────────────────────────────────────────────
+sharepoint:
+  # Subfolders under SHAREPOINT_ROOT (set in .env)
+  raw_dir: "aiccon-data/raw"           # one subfolder per domain, e.g. raw/social_economy/
+  processed_dir: "aiccon-data/processed"
+  database_dir: "aiccon-data/database"
+  database_filename: "aiccon.duckdb"
+  log_filename: "pipeline_log.json"
+
+# ── Active domains ────────────────────────────────────────────────────────────
+# Set enabled: false to skip a domain during pipeline runs
+domains:
+  social_economy:
+    enabled: true
+  welfare:
+    enabled: false
+  poverty:
+    enabled: false
+  immigration:
+    enabled: false
+  labour:
+    enabled: true
+  sdg:
+    enabled: false
+  civil_society:
+    enabled: false
+  housing:
+    enabled: false
+
+# ── Eurostat API ──────────────────────────────────────────────────────────────
+eurostat:
+  base_url: "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
+
+  # Datasets fetched for social economy
+  social_economy:
+    # Employment by NACE activity and NUTS2 region
+    - dataset: "nama_10r_3empers"
+      label: "Regional employment by NACE (NUTS2)"
+      filters:
+        nace_r2: ["O-Q", "R-U"]   # Health/social work, Education, Membership orgs
+        geo_level: "NUTS2"
+        unit: "THS"              # Thousands of persons
+    # Number of enterprises by NACE and NUTS2
+    - dataset: "bd_enace2_r3"
+      label: "Enterprises by NACE and region (NUTS2)"
+      filters:
+        nace_r2: ["Q", "S94"]
+        geo_level: "NUTS2"
+
+  # Datasets fetched for labour
+  labour:
+    # Employed persons by detailed economic activity (NACE Rev. 2)
+    - dataset: "lfsa_egan22d"
+      label: "Employed persons by NACE (NUTS2)"
+      filters:
+        geo_level: "NUTS0"
+        unit: "THS"              # Thousands of persons
+    # Unemployment rates by educational attainment level and NUTS 2 region
+    - dataset: "lfst_r_lfu3rt"
+      label: "Unemployment rates by educational attainment level and NUTS 2 region"
+      filters:
+        geo_level: "NUTS2"
+    # Unemployment rates by citizenship and NUTS 2 region
+    - dataset: "lfst_r_lfur2gan"
+      label: "Unemployment rates by citizenship and NUTS 2 region"
+      filters:
+        geo_level: "NUTS2"
+    # Employment rates by educational attainmental level, citizenship and NUTS 2 region
+    - dataset: "lfst_r_lfe2emprtn"
+      label: "Employment rates by education, citizenship and NUTS 2 region"
+      filters:
+        geo_level: "NUTS2"
+
+# ── ISTAT SDMX API ────────────────────────────────────────────────────────────
+istat:
+  base_url: "https://sdmx.istat.it/SDMXWS/rest"
+
+  # Datasets fetched for social economy
+  social_economy:
+    # Nonprofit institutions census (Censimento delle istituzioni non profit)
+    - dataset: "DCCV_INSTNONPROFIT"
+      label: "Nonprofit institutions — census"
+      description: >
+        Count of nonprofit institutions by legal form, economic activity,
+        region and province. Updated following each census cycle.
+    # Employees and volunteers in nonprofit institutions
+    - dataset: "DCCV_ADDNONPROFIT"
+      label: "Nonprofit institutions — employees and volunteers"
+      description: >
+        Paid employees and volunteers by legal form, gender, region.
+    # Social cooperatives (cooperative sociali) — separate registry-based series
+    - dataset: "DCCV_COOPSOCIALI"
+      label: "Social cooperatives"
+      description: >
+        Count and employment in social cooperatives (tipo A, tipo B)
+        by region and province. Gender breakdown where available.
+    # Labour force survey — employees in health/social sectors (for trend data)
+    - dataset: "DCCV_OCCUPATIT"
+      label: "Labour force survey — employed persons"
+      description: >
+        Employed persons by economic activity (NACE), gender, region.
+        Used for trend data between census years.
+
+  # Datasets fetched for labour
+  labour:
+    # Monthly labour force survey (Forze lavoro - dati mensili)
+    - dataset: "DCCV_FORZLVMENS1"
+      label: "Monthly labour force survey"
+      description: >
+        Monthly data on the labour force by economic activity (NACE), gender, region.
+    # Statistics on NEETs (Not in Employment, Education or Training) 
+    - dataset: "DCCV_NEET1"
+      label: "NEETs statistics"
+      description: >
+        Data on persons not in employment, education or training by economic activity (NACE), gender, region.
+    # Inactivity rate (Tasso di inattività)
+    - dataset: "DCCV_TAXINATT1"
+      label: "Inactivity rate"
+      description: >
+        Inactivity rate by economic activity (NACE), gender, region.
+    # Unemployment rate (Tasso di disoccupazione)
+    - dataset: "DCCV_TAXDISOCCU1"
+      label: "Unemployment rate"
+      description: >
+        Unemployment rate by economic activity (NACE), gender, region.
+    # Employment rate (Tasso di occupazione)
+    - dataset: "DCCV_TAXOCCU1"
+      label: "Employment rate"
+      description: >
+        Employment rate by economic activity (NACE), gender, region.
+        
+
+# ── Geography scope ───────────────────────────────────────────────────────────
+geography:
+  # Eurostat: which NUTS levels to retain
+  eurostat_nuts_levels: [0, 2]       # 0 = country, 2 = region
+  # ISTAT: which territorial levels to retain
+  istat_levels: ["nazionale", "regionale", "provinciale"]
+  # Country filter for Eurostat (empty list = all EU27)
+  # Set to ["IT"] if you only want Italy from Eurostat
+  eurostat_countries: []
+
+# ── Pipeline behaviour ────────────────────────────────────────────────────────
+pipeline:
+  # If true, skip API fetch and re-use existing raw parquet files
+  use_cached_raw: false
+  # How many years back to fetch (null = all available)
+  max_years_back: null
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO"
