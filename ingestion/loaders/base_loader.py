@@ -186,6 +186,7 @@ def make_retry_session(
     total_attempts: int = 5,
     backoff_factor: float = 2.0,
     logger: logging.Logger | None = None,
+    read_timeout: int = 180,
 ) -> requests.Session:
     """
     Return a requests.Session with exponential backoff retry logic via tenacity.
@@ -208,7 +209,10 @@ def make_retry_session(
         reraise=True,
     )
     def _get(url: str, **kwargs) -> requests.Response:
-        response = session.get(url, timeout=60, **kwargs)
+        # (connect timeout, read timeout) in seconds. The read timeout is
+        # generous because some ISTAT requests (e.g. FORZLVMENS1_1, every
+        # month since 2015) take more than a minute before data starts arriving.
+        response = session.get(url, timeout=(15, read_timeout), **kwargs)
         response.raise_for_status()
         return response
 
@@ -368,7 +372,8 @@ class BaseLoader(ABC):
         self.config = config or load_config()
         log_level = self.config.get("pipeline", {}).get("log_level", "INFO")
         self.logger = get_logger(self.__class__.__name__, level=log_level)
-        self.session = make_retry_session(logger=self.logger)
+        read_timeout = self.config.get("pipeline", {}).get("http_read_timeout", 180)
+        self.session = make_retry_session(logger=self.logger, read_timeout=read_timeout)
 
         # GCS prefix for raw output — replaces the local output_dir Path
         self.gcs_prefix = raw_gcs_prefix(self.config, self.DOMAIN)
@@ -398,14 +403,16 @@ class BaseLoader(ABC):
         dataframes = self.fetch()
 
         written = []
+        empty: list[str] = []
         for df in dataframes:
+            dataset_code = df.attrs.get("dataset_code", self.SOURCE_ID)
             if df.empty:
                 self.logger.warning(
-                    f"{self.SOURCE_ID}: fetch returned an empty DataFrame — skipping."
+                    f"{self.SOURCE_ID}: {dataset_code} returned no data, skipping."
                 )
+                empty.append(dataset_code)
                 continue
 
-            dataset_code = df.attrs.get("dataset_code", self.SOURCE_ID)
             df = add_metadata_columns(df, self.SOURCE_ID, dataset_code)
             uri = save_raw_parquet(
                 df,
@@ -427,4 +434,16 @@ class BaseLoader(ABC):
         self.logger.info(
             f"Finished {self.SOURCE_ID}: {len(written)} file(s) written."
         )
+
+        # A dataset that comes back empty almost always means the request
+        # failed (e.g. a timeout the fetcher caught). Raising here makes the
+        # ingest stage report an error and the pipeline exit with code 1,
+        # instead of the processing stage silently reusing last month's file.
+        # Files for the other datasets have already been written above.
+        if empty:
+            raise RuntimeError(
+                f"{self.SOURCE_ID}: {len(empty)} dataset(s) returned no data: {empty}. "
+                f"{len(written)} other file(s) were written. Processing will fall back "
+                "to the previous raw file for the missing dataset(s)."
+            )
         return written

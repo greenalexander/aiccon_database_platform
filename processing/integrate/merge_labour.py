@@ -330,7 +330,25 @@ def resolve_priority(df: pd.DataFrame) -> pd.DataFrame:
     Where multiple sources provide the same indicator for the same
     geo + time + dimension combination, keep the highest-priority row.
     ISTAT (priority=1) is always preferred for Italy.
+
+    Rows with no nuts_code (geography the mapper could not match) are kept
+    out of the de-duplication. Otherwise every unmatched territory shares the
+    same empty code, and all but one of them are discarded as "duplicates":
+    this is how 48 provinces were collapsed into one in October 2026. They
+    are passed through unchanged so build_db.py reports how many there are.
     """
+    no_geo = df["nuts_code"].isna() | (df["nuts_code"].astype(str).str.strip() == "")
+    if no_geo.any():
+        by_ds = df.loc[no_geo, "dataset_code"].value_counts()
+        logger.warning(
+            f"{int(no_geo.sum()):,} rows have no nuts_code and are excluded from "
+            "priority resolution, by dataset: "
+            + ", ".join(f"{k} ({v:,})" for k, v in by_ds.items())
+            + ". See the harmonise_istat_geo warnings for the unmatched codes."
+        )
+    unmapped = df[no_geo]
+    df = df[~no_geo]
+
     dedup_keys = [
         "indicator_code", "nuts_code", "time",
         "nace_code", "gender", "age_group",
@@ -346,7 +364,7 @@ def resolve_priority(df: pd.DataFrame) -> pd.DataFrame:
     after = len(df)
     if before > after:
         logger.info(f"Priority resolution: removed {before - after:,} lower-priority duplicates.")
-    return df
+    return pd.concat([df, unmapped], ignore_index=True)
 
 
 # ── Main merge function ───────────────────────────────────────────────────────

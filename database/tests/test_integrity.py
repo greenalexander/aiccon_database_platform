@@ -94,6 +94,11 @@ DEFAULT_MAX_AGE_DAYS = 45
 # NUTS1 is not checked because nothing in the facts is published at that level.
 ITALY_NUTS_UNITS = {0: 1, 2: 21, 3: 107}
 
+# Status for Italian codes that are in dim_geography but not in nuts_istat.csv
+# (inserted automatically, without names). nuts_istat.csv covers NUTS 2024
+# since October 2026, so any such code is a gap to fix.
+AUTO_GEO_STATUS = "FAIL"
+
 # Required format of period_label on monthly (frequency = 'M') rows.
 MONTHLY_LABEL_RE = r"^\d{4}-\d{2}$"
 
@@ -134,6 +139,9 @@ DIMENSIONS: dict[str, dict] = {
         "key": "geo_key",
         "natural_key": ["nuts_code"],
         "required": ["geo_key", "nuts_code", "nuts_level", "country_code"],
+        # ISTAT aggregates (Nord, Mezzogiorno, Trentino-Alto Adige) are not
+        # NUTS units, so they deliberately have no nuts_level.
+        "null_exempt": {"nuts_level": "geo_source = 'istat_aggregate'"},
         # Italian NUTS0 + NUTS2 + NUTS3. Other countries are added on top.
         "min_rows": sum(ITALY_NUTS_UNITS.values()),
     },
@@ -151,11 +159,8 @@ DIMENSIONS: dict[str, dict] = {
     },
     "dim_legal_form": {
         "key": "legal_form_key",
-        # No natural-key check: the MERGE key in build_db is
-        # (unified_category, source_system), which is not unique in the CSV
-        # if several source codes map to one category.
-        "natural_key": [],
-        "required": ["legal_form_key", "unified_category"],
+        "natural_key": ["source_system", "source_code"],
+        "required": ["legal_form_key", "unified_category", "source_system", "source_code"],
         "min_rows": lambda: _csv_row_count("legal_form_map.csv"),
     },
     "dim_indicator": {
@@ -170,9 +175,9 @@ DIMENSIONS: dict[str, dict] = {
 FACT_CHECKS: dict[str, dict] = {
     "social_economy": {
         "table": "fact_social_economy",
-        # Placeholder. Set to roughly 90% of the count from the first clean
-        # (non-duplicated) load, as shown in the summary output.
-        "min_rows": 1,
+        # ~90% of the clean count. Baseline 19 Oct 2026: 7,258 rows, every one
+        # duplicated, so 3,629 real rows.
+        "min_rows": 3_250,
         # Carried over from the DuckDB-era integrity_tests.py. Any other
         # indicator present is listed in the check's detail line; promote it
         # here once you are sure the merge always produces it.
@@ -191,14 +196,32 @@ FACT_CHECKS: dict[str, dict] = {
         # assumes the Eurostat regional employment rows (nama_10r_3empers)
         # are loaded. Add 3: 107 if provincial data are expected.
         "italy_nuts_min": {0: 1, 2: 21},
-        # Empty list = only check freshness of whatever datasets are present.
-        "expected_datasets": [],
+        # Datasets present in the 19 Oct 2026 baseline
+        "expected_datasets": [
+            "83_63_DF_DCCV_AVQ_PERSONE_129",
+            "83_63_DF_DCCV_AVQ_PERSONE_130",
+            "83_63_DF_DCCV_AVQ_PERSONE_131",
+            "83_63_DF_DCCV_AVQ_PERSONE_132",
+            "85_171_DF_DCSA_VOLON_ORG1_1",
+            "85_171_DF_DCSA_VOLON_ORG1_2",
+            "85_171_DF_DCSA_VOLON_ORG1_3",
+            "85_171_DF_DCSA_VOLON_ORG1_4",
+            "85_84_DF_DCSA_VOLON1_1",
+            "85_84_DF_DCSA_VOLON1_2",
+            "85_84_DF_DCSA_VOLON1_3",
+            "85_84_DF_DCSA_VOLON1_6",
+            "lfsa_egan22d",
+            "nama_10r_3empers",
+            "sbs_r_nuts2021",
+        ],
         # BigQuery views (later: dbt marts) that PowerBI depends on.
         "views": [],
     },
     "labour": {
         "table": "fact_labour",
-        "min_rows": 1,  # placeholder, as above
+        # ~90% of the baseline (19 Oct 2026: 309,321 rows, no duplicates).
+        # Will rise once provincial data load correctly.
+        "min_rows": 275_000,
         # ISTAT_DATASET_META and EUROSTAT_DATASET_META in merge_labour.py
         "expected_indicators": [
             "labour_force",
@@ -219,11 +242,11 @@ FACT_CHECKS: dict[str, dict] = {
         # NUTS3 comes from the ISTAT provincial datasets (TAXINATT1_5,
         # TAXDISOCCU1_8, TAXOCCU1_5); NUTS2 from NEET1_11 and Eurostat.
         "italy_nuts_min": {0: 1, 2: 21, 3: 107},
-        # Non-Italian countries with NUTS0 rows (Eurostat). Threshold carried
-        # over from the old file; raise it once you have seen the real count.
-        "min_other_countries": 10,
-        # A = annual rate datasets, M = FORZLVMENS1_1
-        "expected_frequencies": ["A", "M"],
+        # Non-Italian countries with NUTS0 rows (Eurostat). Baseline: 33.
+        "min_other_countries": 30,
+        # A = annual, Q = quarterly (60,024 rows in the baseline),
+        # M = monthly (FORZLVMENS1_1)
+        "expected_frequencies": ["A", "Q", "M"],
         # Must not be entirely null or blank (Eurostat rate datasets fill them)
         "populated_columns": ["education", "citizenship"],
         # Mirrors the same two dicts in merge_labour.py. Update both together.
@@ -393,15 +416,18 @@ def _italy_units_by_level(
     geo_ref = _ref(config, "dim_geography")
     if fact_ref is None:
         source = f"`{geo_ref}` AS g"
+        # Inactive rows are codes retired from nuts_istat.csv (e.g. ITC45)
+        active_only = "AND IFNULL(g.is_active, TRUE)"
     else:
         source = (
             f"(SELECT DISTINCT geo_key FROM `{fact_ref}`) AS f "
             f"JOIN `{geo_ref}` AS g ON f.geo_key = g.geo_key"
         )
+        active_only = ""
     rows = _query(client, f"""
         SELECT g.nuts_level, COUNT(DISTINCT g.nuts_code) AS n_units
         FROM {source}
-        WHERE g.country_code = 'IT'
+        WHERE g.country_code = 'IT' {active_only}
         GROUP BY g.nuts_level
     """)
     return {r["nuts_level"]: r["n_units"] for r in rows if r["nuts_level"] is not None}
@@ -421,13 +447,21 @@ def check_nulls(
     ref: str,
     columns: list[str],
     required: list[str],
+    exempt: dict[str, str] | None = None,
 ) -> Outcome:
+    """exempt maps a column to a SQL condition under which NULL is allowed."""
+    exempt  = exempt or {}
     present = [c for c in required if c in columns]
     absent  = [c for c in required if c not in columns]
 
+    def _null_expr(c: str) -> str:
+        if c in exempt:
+            return f"COUNTIF(`{c}` IS NULL AND NOT IFNULL({exempt[c]}, FALSE)) AS `{c}`"
+        return f"COUNTIF(`{c}` IS NULL) AS `{c}`"
+
     nulls: dict[str, int] = {}
     if present:
-        exprs = ",\n".join(f"COUNTIF(`{c}` IS NULL) AS `{c}`" for c in present)
+        exprs = ",\n".join(_null_expr(c) for c in present)
         row = _query(client, f"SELECT {exprs} FROM `{ref}`")[0]
         nulls = {c: row[c] for c in present if row[c]}
 
@@ -537,7 +571,7 @@ def check_italy_auto_geo(client: bigquery.Client, config: dict) -> Outcome:
         SELECT nuts_code
         FROM `{geo_ref}`
         WHERE country_code = 'IT'
-          AND IFNULL(geo_source, '') != 'nuts_istat_csv'
+          AND IFNULL(geo_source, '') NOT IN ('nuts_istat_csv', 'istat_aggregate')
         ORDER BY nuts_code
     """)
     codes = [r["nuts_code"] for r in rows]
@@ -546,7 +580,7 @@ def check_italy_auto_geo(client: bigquery.Client, config: dict) -> Outcome:
         shown = ", ".join(codes[:15])
         more  = f" and {len(codes) - 15} more" if len(codes) > 15 else ""
         detail = f"not in nuts_istat.csv, auto-inserted without names: {shown}{more}"
-    return (WARN if codes else PASS), _n(len(codes)), "0", detail
+    return (AUTO_GEO_STATUS if codes else PASS), _n(len(codes)), "0", detail
 
 
 def check_indicators(
@@ -845,7 +879,7 @@ def _check_dimension(client: bigquery.Client, cfg: dict, table: str, spec: dict)
         _run(table, "row count",
              lambda: check_row_count(client, ref, _min_rows())),
         _run(table, "nulls in required columns",
-             lambda: check_nulls(client, ref, columns, spec["required"])),
+             lambda: check_nulls(client, ref, columns, spec["required"], spec.get("null_exempt"))),
         _run(table, "key uniqueness",
              lambda: check_key_uniqueness(client, ref, spec["key"], spec["natural_key"])),
     ]

@@ -67,6 +67,9 @@ Single entry point for the full aiccon-data pipeline.
          python -m database.build_db --domain social_economy
          python -m database.tests.test_integrity
 
+  5. After every run, check the data itself:
+         python -m database.tests.test_integrity
+
 ── Adding a new domain ───────────────────────────────────────────────────────
 
   Only ONE change is needed in this file: add the new loader classes to
@@ -183,8 +186,14 @@ def run_ingest(domains: list[str] | None, config: dict) -> dict:
 
         results[domain] = domain_results
 
+    # Any failed loader makes the stage an error, so the run exits with code 1.
+    # The processing stage still runs and falls back to the previous month's
+    # raw file for the failed dataset; the integrity checks flag it as stale.
+    any_error = any(
+        r["status"] == "error" for loader_results in results.values() for r in loader_results
+    )
     return {
-        "status":     "complete",
+        "status":     "error" if any_error else "complete",
         "started_at": started_at.isoformat(),
         "results":    results,
     }
@@ -222,10 +231,12 @@ def run_database(domains: list[str] | None, config: dict) -> dict:
 
     started_at = datetime.now(timezone.utc)
     try:
-        build_database(domains=domains, config=config)
+        results = build_database(domains=domains, config=config)
+        failed = [d for d, r in results.items() if r["status"] == "error"]
         return {
-            "status":     "complete",
+            "status":     "error" if failed else "complete",
             "started_at": started_at.isoformat(),
+            "results":    results,
         }
     except Exception as e:
         logger.error(f"Database build failed: {e}", exc_info=True)
@@ -394,4 +405,4 @@ if __name__ == "__main__":
     domains = [args.domain] if args.domain else None
 
     success = run_pipeline(stages=stages, domains=domains, config=config)
-    sys.exit(0 if success else 1)
+    sys.exit(0 if success else 1)

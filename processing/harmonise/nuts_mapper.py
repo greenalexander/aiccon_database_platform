@@ -23,6 +23,7 @@ the output schema is identical to the ISTAT path.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -135,6 +136,16 @@ def harmonise_istat_geo(
         2. Fallback: match raw geo code against nuts_code column in the mapping.
                      This covers ISTAT labour (RFL) datasets that use NUTS-style
                      codes directly, e.g. 'ITC11', 'ITH55', rather than numeric codes.
+        3. Legacy:   ISTAT's territorial codelist (ITTER107) still uses some
+                     pre-2010 codes. Two systematic cases are translated:
+                     - 'ITD..' / 'ITE..' (NUTS 2006 Nord-Est / Centro) become
+                       'ITH..' / 'ITI..'. NUTS 2010 renamed these two groups
+                       without changing the units, so e.g. ITD55 -> ITH55 Bologna.
+                     - 'IT' + 3 digits (e.g. 'IT108'), the form used for provinces
+                       created after 2006, is matched on the ISTAT province
+                       number (108 = Monza e della Brianza).
+                     Irregular legacy codes (e.g. ITC45 Milano, ITG25 Sassari) are
+                     listed as rows in nuts_istat.csv and caught by pass 1.
 
     Parameters
     ----------
@@ -178,6 +189,17 @@ def harmonise_istat_geo(
     lookup_by_istat = mapping.copy()
     lookup_by_istat["_key"] = lookup_by_istat["istat_code"].str.upper()
     lookup_by_istat = lookup_by_istat.dropna(subset=["_key"])
+    lookup_by_istat = lookup_by_istat[lookup_by_istat["_key"] != ""]
+    conflicts = (
+        lookup_by_istat.groupby("_key")["nuts_code"].nunique(dropna=False)
+        .loc[lambda s: s > 1].index.tolist()
+    )
+    if conflicts:
+        logger.warning(
+            f"harmonise_istat_geo: istat_code values mapped to more than one "
+            f"nuts_code in nuts_istat.csv (the last row wins): {conflicts}. Fix the CSV."
+        )
+    lookup_by_istat = lookup_by_istat.drop_duplicates(subset=["_key"], keep="last")
     lookup_by_istat = lookup_by_istat.set_index("_key")
 
     # ── Fallback lookup: nuts_code → nuts_code (identity mapping) ────────────
@@ -212,6 +234,33 @@ def harmonise_istat_geo(
             logger.info(
                 f"harmonise_istat_geo: {n_recovered:,} rows matched via NUTS code "
                 "fallback lookup (RFL-style codes like ITC11, ITH55)."
+            )
+
+    # ── Legacy pass: pre-2010 ITTER107 codes (see docstring) ─────────────────
+    still_unmatched = df["nuts_code"].isna()
+    if still_unmatched.any():
+        def _translate(code: str) -> tuple[str, str] | None:
+            if re.fullmatch(r"IT[DE][0-9A-Z]{0,2}", code):
+                return "nuts", ("ITH" if code[2] == "D" else "ITI") + code[3:]
+            if re.fullmatch(r"IT\d{3}", code):
+                return "istat", code[2:]
+            return None
+
+        translated = raw_geo[still_unmatched].map(_translate)
+        n_legacy = 0
+        for kind, lookup in (("nuts", lookup_by_nuts), ("istat", lookup_by_istat)):
+            sel = translated.map(lambda t: t is not None and t[0] == kind)
+            if not sel.any():
+                continue
+            keys = translated[sel].map(lambda t: t[1])
+            for col in cols:
+                if col in lookup.columns:
+                    df.loc[keys.index, col] = keys.map(lookup[col].to_dict())
+            n_legacy += int(df.loc[keys.index, "nuts_code"].notna().sum())
+        if n_legacy:
+            logger.info(
+                f"harmonise_istat_geo: {n_legacy:,} rows matched via legacy "
+                "ITTER107 codes (ITD/ITE prefixes or IT + province number)."
             )
 
     df["country_code"] = "IT"

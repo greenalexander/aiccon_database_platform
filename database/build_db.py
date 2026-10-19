@@ -7,9 +7,20 @@ What this script does, in order:
     1. Checks GCS and BigQuery are reachable
     2. Creates dimension tables if they do not exist (idempotent)
     3. Creates fact tables if they do not exist (idempotent)
-    4. Populates dimension tables from mapping CSVs (MERGE — safe to re-run)
-    5. Loads each active domain's processed parquet into its fact table
+    4. Upserts dimension tables from mapping CSVs (safe to re-run)
+    5. Replaces each active domain's fact table with its latest processed parquet
     6. Writes pipeline log to GCS
+
+Keys and re-runs:
+    Dimension rows keep their surrogate key for ever. Re-running updates their
+    attributes (names, labels) from the mapping CSVs and gives genuinely new
+    rows keys from MAX(key) + 1, so a new row can never reuse an existing key.
+    Fact tables are replaced in full on every run, because each processed
+    parquet is a complete snapshot of its domain. Running this script twice
+    therefore gives the same result as running it once.
+
+Exit code is 1 if any domain failed to load, so run_pipeline.py and
+GitHub Actions can see the failure.
 
 Note: This script will be superseded by dbt once the transformation layer
 is introduced. At that point, schema management and mart models will move
@@ -131,6 +142,7 @@ def _load_df_to_bq(
     df: pd.DataFrame,
     table_id: str,
     write_disposition: str = bigquery.WriteDisposition.WRITE_APPEND,
+    schema_table: str | None = None,
 ) -> int:
     """
     Load a pandas DataFrame into a BigQuery table via a parquet temp file.
@@ -140,8 +152,9 @@ def _load_df_to_bq(
     type. String columns are normalised (float NaN -> None) before serialisation
     so pyarrow does not raise ArrowTypeError on mixed-type object columns.
 
-    For temporary staging tables that do not exist yet in BigQuery, falls back
-    to inference-based typing.
+    For temporary staging tables that do not exist yet in BigQuery, pass
+    schema_table (the table the temp data will be merged into) to type the
+    columns from that table; otherwise typing falls back to inference.
     """
     import tempfile
     import os
@@ -167,7 +180,7 @@ def _load_df_to_bq(
     # Try to fetch the BQ table schema; fall back for temp/non-existent tables
     bq_schema: dict = {}
     try:
-        bq_table = client.get_table(table_id)
+        bq_table = client.get_table(schema_table or table_id)
         for field in bq_table.schema:
             bq_schema[field.name] = _BQ_TO_PA.get(field.field_type, pa.string())
     except Exception:
@@ -276,66 +289,195 @@ def _next_surrogate_key(client: bigquery.Client, config: dict, table: str, key_c
 
 
 # ── Dimension population ──────────────────────────────────────────────────────
+#
+# Every populate_* function goes through _upsert_dimension(), which matches
+# rows on the table's natural key (nuts_code, year, source_id, ...):
+#   - existing rows keep their surrogate key and have their attributes
+#     refreshed from the mapping CSV, so fixing a name in a CSV fixes it here
+#   - new rows get keys from MAX(key) + 1
+#
+# Previously each function numbered rows 1..n by their position in the CSV.
+# A new row then took key n+1, which could already belong to a row added
+# elsewhere (e.g. a Eurostat country auto-inserted into dim_geography), giving
+# duplicate keys: fanned-out joins in SQL and refresh errors in PowerBI.
+
+# Eurostat "Extra-Regio" codes (ITZ, ITZZ, ITZZZ, DEZ, ...): economic activity
+# that cannot be attributed to any region. Not real territories, so they are
+# excluded from both the geography dimension and the fact tables.
+EXTRA_REGIO_PATTERN = r"^[A-Z]{2}Z+$"
+
+
+def _blank(v) -> bool:
+    """True for None, NaN and empty or whitespace-only strings."""
+    return v is None or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, str) and not v.strip())
+
+
+def _upsert_dimension(
+    client: bigquery.Client,
+    config: dict,
+    table: str,
+    key_col: str,
+    natural_key: list[str],
+    df: pd.DataFrame,
+) -> tuple[int, int]:
+    """
+    Upsert rows into a dimension table, matching on its natural key.
+
+    Existing rows keep their surrogate key and have every other column
+    refreshed from df. New rows are inserted with keys from MAX(key) + 1.
+    Columns of df that the table does not have are ignored; table columns
+    missing from df are loaded as NULL. Rows already in the table but not in
+    df (e.g. Eurostat countries auto-inserted by _upsert_geo_rows) are left
+    untouched.
+
+    Returns (n_inserted, n_updated).
+    """
+    full = _full_table(config, table)
+    schema_cols = [f.name for f in client.get_table(full).schema]
+
+    df = df.copy()
+    for c in natural_key:
+        df[c] = df[c].where(df[c].notna(), None)
+    incomplete = df[natural_key].isna().any(axis=1)
+    if incomplete.any():
+        logger.warning(
+            f"  {table}: {int(incomplete.sum())} rows skipped because "
+            f"their natural key {natural_key} is incomplete"
+        )
+        df = df[~incomplete]
+    df = df.drop_duplicates(subset=natural_key, keep="last")
+
+    # Natural key -> existing surrogate key
+    nk_sql = ", ".join(f"`{c}`" for c in natural_key)
+    existing = {
+        tuple(row[:-1]): row[-1]
+        for row in _run_query(client, f"SELECT {nk_sql}, `{key_col}` FROM `{full}`")
+    }
+
+    next_key = _next_surrogate_key(client, config, table, key_col)
+    keys, n_new = [], 0
+    for nk in df[natural_key].itertuples(index=False, name=None):
+        if nk in existing:
+            keys.append(existing[nk])
+        else:
+            keys.append(next_key)
+            next_key += 1
+            n_new += 1
+    df[key_col] = keys
+    df = df.reindex(columns=schema_cols)
+
+    tmp_table = _full_table(config, f"_tmp_{table}_upsert")
+    _load_df_to_bq(client, df, tmp_table, write_disposition="WRITE_TRUNCATE", schema_table=full)
+
+    on    = " AND ".join(f"T.`{c}` = S.`{c}`" for c in natural_key)
+    attrs = [c for c in schema_cols if c != key_col and c not in natural_key]
+    cols  = ", ".join(f"`{c}`" for c in schema_cols)
+    vals  = ", ".join(f"S.`{c}`" for c in schema_cols)
+    when_matched = (
+        "WHEN MATCHED THEN UPDATE SET " + ", ".join(f"`{c}` = S.`{c}`" for c in attrs)
+        if attrs else ""
+    )
+    try:
+        client.query(f"""
+            MERGE `{full}` T
+            USING `{tmp_table}` S
+            ON {on}
+            {when_matched}
+            WHEN NOT MATCHED THEN INSERT ({cols}) VALUES ({vals})
+        """).result()
+    finally:
+        client.delete_table(tmp_table, not_found_ok=True)
+
+    return n_new, len(df) - n_new
+
+
+def _log_dimension(client: bigquery.Client, config: dict, table: str, n_new: int, n_upd: int) -> int:
+    n = _run_query(client, f"SELECT COUNT(*) FROM `{_full_table(config, table)}`")[0][0]
+    logger.info(f"  {table}: {n:,} rows ({n_new} inserted, {n_upd} refreshed)")
+    return n
+
 
 def populate_dim_geography(client: bigquery.Client, config: dict, mappings_dir: Path) -> int:
     """
-    Populate dim_geography from nuts_istat.csv using MERGE (upsert).
-    Safe to re-run — existing rows are not duplicated.
+    Upsert dim_geography from nuts_istat.csv, then remove Extra-Regio codes.
+
+    Rows whose code combines several NUTS units, such as 'ITC;ITH' (Nord),
+    'ITF;ITG' (Mezzogiorno) or 'ITH1;ITH2' (Trentino-Alto Adige), are ISTAT
+    aggregates: ISTAT publishes data for them but NUTS does not define them.
+    They used to be skipped here and then auto-inserted without names by
+    _upsert_geo_rows when they appeared in the facts. They are now loaded
+    deliberately, with their names, geo_source = 'istat_aggregate' and
+    nuts_level = NULL. The NULL level is intentional: giving Trentino-Alto
+    Adige level 2 would double count Bolzano and Trento in any sum over regions.
     """
     path = mappings_dir / "nuts_istat.csv"
     df = pd.read_csv(path, dtype=str)
     df = df.apply(lambda c: c.str.strip() if c.dtype == object else c)
 
+    def _val(r, col):
+        v = r.get(col)
+        return None if _blank(v) else v
+
     rows = []
     for _, r in df.iterrows():
-        # Some NUTS1 rows have nuts_code empty with the code in istat_code instead
-        nuts_code = r.get("nuts_code") or r.get("istat_code") or None
-        # Skip multi-code rows like 'ITH1;ITH2' — can't map to a single geo_key
-        if nuts_code and ";" in str(nuts_code):
-            continue
+        # Some NUTS1 rows have nuts_code empty with the code in istat_code
+        # instead. Only use that fallback when it looks like a NUTS code.
+        nuts_code = _val(r, "nuts_code")
+        if nuts_code is None:
+            fallback = _val(r, "istat_code")
+            nuts_code = fallback if fallback and fallback.startswith("IT") else None
+
+        is_aggregate = bool(nuts_code) and ";" in nuts_code
+        level = _val(r, "nuts_level")
         rows.append({
             "nuts_code":         nuts_code,
-            "nuts_level":        int(r["nuts_level"]) if pd.notna(r.get("nuts_level")) else None,
-            "nuts_name_it":      r.get("nuts_name_it") or None,
-            "nuts_name_en":      r.get("nuts_name_en") or None,
-            "istat_code":        r.get("istat_code")   or None,
+            "nuts_level":        None if (is_aggregate or level is None) else int(float(level)),
+            "nuts_name_it":      _val(r, "nuts_name_it"),
+            "nuts_name_en":      _val(r, "nuts_name_en"),
+            "istat_code":        _val(r, "istat_code"),
             "country_code":      "IT",
-            "region_name":       r.get("region_name")  or None,
-            "macro_area":        r.get("macro_area")   or None,
-            "municipality_type": None,  # always null for CSV rows
-            "geo_source":        "nuts_istat_csv",
+            "region_name":       _val(r, "region_name"),
+            "macro_area":        _val(r, "macro_area"),
+            "municipality_type": None,
+            "geo_source":        "istat_aggregate" if is_aggregate else "nuts_istat_csv",
             "is_active":         True,
         })
 
     geo_df = pd.DataFrame(rows)
     geo_df = geo_df[geo_df["nuts_code"].notna()]
-    geo_df = geo_df.drop_duplicates(subset=["nuts_code"], keep="last")
+    geo_df = geo_df[~geo_df["nuts_code"].str.match(EXTRA_REGIO_PATTERN)]
     geo_df["nuts_level"] = pd.array(geo_df["nuts_level"], dtype="Int64")
-    # Assign surrogate keys starting from 1
-    geo_df.insert(0, "geo_key", range(1, len(geo_df) + 1))
+
+    n_new, n_upd = _upsert_dimension(
+        client, config, "dim_geography", "geo_key", ["nuts_code"], geo_df
+    )
+
+    # Rows loaded from an earlier version of the CSV whose code is no longer
+    # in it (e.g. ITC45, ITG25: pre-2021 NUTS codes) are marked inactive
+    # rather than deleted, so any fact row still pointing at them stays valid.
+    # Filter on is_active in PowerBI to hide them.
     full = _full_table(config, "dim_geography")
+    codes_sql = ", ".join(f"'{c}'" for c in geo_df["nuts_code"])
+    stale_where = (
+        "geo_source IN ('nuts_istat_csv', 'istat_aggregate') "
+        f"AND nuts_code NOT IN ({codes_sql}) AND IFNULL(is_active, TRUE)"
+    )
+    stale = [r[0] for r in _run_query(client, f"SELECT nuts_code FROM `{full}` WHERE {stale_where}")]
+    if stale:
+        client.query(f"UPDATE `{full}` SET is_active = FALSE WHERE {stale_where}").result()
+        logger.info(f"  dim_geography: marked {len(stale)} codes no longer in nuts_istat.csv as inactive: {sorted(stale)}")
 
-    tmp_table = _full_table(config, "_tmp_geo_load")
-    _load_df_to_bq(client, geo_df, tmp_table, write_disposition="WRITE_TRUNCATE")
+    # Extra-Regio rows auto-inserted by earlier runs. The fact loaders no
+    # longer produce them, and every run replaces the fact tables, so nothing
+    # will reference these keys once the facts are reloaded.
+    full = _full_table(config, "dim_geography")
+    extra_regio = f"REGEXP_CONTAINS(nuts_code, r'{EXTRA_REGIO_PATTERN}')"
+    n_er = _run_query(client, f"SELECT COUNT(*) FROM `{full}` WHERE {extra_regio}")[0][0]
+    if n_er:
+        client.query(f"DELETE FROM `{full}` WHERE {extra_regio}").result()
+        logger.info(f"  dim_geography: removed {n_er} Extra-Regio rows")
 
-    client.query(f"""
-        MERGE `{full}` T
-        USING `{tmp_table}` S ON T.nuts_code = S.nuts_code
-        WHEN NOT MATCHED THEN INSERT (
-            geo_key, nuts_code, nuts_level, nuts_name_it, nuts_name_en, istat_code,
-            country_code, region_name, macro_area, municipality_type, geo_source, is_active
-        ) VALUES (
-            S.geo_key, S.nuts_code, S.nuts_level, S.nuts_name_it, S.nuts_name_en, S.istat_code,
-            S.country_code, S.region_name, S.macro_area, S.municipality_type,
-            S.geo_source, S.is_active
-        )
-    """).result()
-
-    client.delete_table(tmp_table, not_found_ok=True)
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  dim_geography: {n} rows")
-    return n
+    return _log_dimension(client, config, "dim_geography", n_new, n_upd)
 
 
 def populate_dim_time(
@@ -343,8 +485,8 @@ def populate_dim_time(
     config: dict,
     year_range: tuple[int, int] = (1990, 2030),
 ) -> int:
-    """Populate dim_time with annual rows. Safe to re-run."""
-    rows = [
+    """Upsert dim_time with annual rows. Safe to re-run."""
+    time_df = pd.DataFrame([
         {
             "year":             year,
             "period_type":      "A",
@@ -352,100 +494,46 @@ def populate_dim_time(
             "reference_period": str(year),
         }
         for year in range(year_range[0], year_range[1] + 1)
-    ]
-    time_df = pd.DataFrame(rows)
-    time_df.insert(0, "time_key", range(1, len(time_df) + 1))
-    full = _full_table(config, "dim_time")
-    tmp_table = _full_table(config, "_tmp_time_load")
-    _load_df_to_bq(client, time_df, tmp_table, write_disposition="WRITE_TRUNCATE")
-
-    client.query(f"""
-        MERGE `{full}` T
-        USING `{tmp_table}` S ON T.year = S.year
-        WHEN NOT MATCHED THEN INSERT (time_key, year, period_type, period_label, reference_period)
-        VALUES (S.time_key, S.year, S.period_type, S.period_label, S.reference_period)
-    """).result()
-
-    client.delete_table(tmp_table, not_found_ok=True)
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  dim_time: {n} rows ({year_range[0]}–{year_range[1]})")
-    return n
+    ])
+    n_new, n_upd = _upsert_dimension(client, config, "dim_time", "time_key", ["year"], time_df)
+    return _log_dimension(client, config, "dim_time", n_new, n_upd)
 
 
 def populate_dim_source(client: bigquery.Client, config: dict, mappings_dir: Path) -> int:
-    """Populate dim_source from domain_sources.csv. Safe to re-run."""
-    path = mappings_dir / "domain_sources.csv"
-    df = pd.read_csv(path, dtype=str)
+    """Upsert dim_source from domain_sources.csv. Safe to re-run."""
+    df = pd.read_csv(mappings_dir / "domain_sources.csv", dtype=str)
     df = df.apply(lambda c: c.str.strip() if c.dtype == object else c)
-    df["priority"] = pd.to_numeric(df["priority"], errors="coerce")
+    df["priority"] = pd.to_numeric(df["priority"], errors="coerce").astype("Int64")
     if "provider" not in df.columns:
         df["provider"] = df["source_id"].str.split("_").str[0]
 
-    full = _full_table(config, "dim_source")
-    df.insert(0, "source_key", range(1, len(df) + 1))
-    tmp_table = _full_table(config, "_tmp_source_load")
-    _load_df_to_bq(client, df, tmp_table, write_disposition="WRITE_TRUNCATE")
-
-    client.query(f"""
-        MERGE `{full}` T
-        USING `{tmp_table}` S ON T.source_id = S.source_id
-        WHEN NOT MATCHED THEN INSERT (
-            source_key, source_id, provider, source_name, source_name_it, domain, access_type,
-            priority, update_frequency, territorial_levels, temporal_coverage, notes
-        ) VALUES (
-            S.source_key, S.source_id, S.provider, S.source_name, S.source_name_it, S.domain,
-            S.access_type, S.priority, S.update_frequency, S.territorial_levels,
-            S.temporal_coverage, S.notes
-        )
-    """).result()
-
-    client.delete_table(tmp_table, not_found_ok=True)
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  dim_source: {n} rows")
-    return n
+    n_new, n_upd = _upsert_dimension(client, config, "dim_source", "source_key", ["source_id"], df)
+    return _log_dimension(client, config, "dim_source", n_new, n_upd)
 
 
 def populate_dim_legal_form(client: bigquery.Client, config: dict, mappings_dir: Path) -> int:
-    """Populate dim_legal_form from legal_form_map.csv. Safe to re-run."""
-    path = mappings_dir / "legal_form_map.csv"
-    df = pd.read_csv(path, dtype=str)
+    """
+    Upsert dim_legal_form from legal_form_map.csv. Safe to re-run.
+
+    The natural key is (source_system, source_code): one row per code in each
+    source system. It used to be (unified_category, source_system), which is
+    not unique (three ISTAT codes map to cooperativa_sociale).
+    """
+    df = pd.read_csv(mappings_dir / "legal_form_map.csv", dtype=str)
     df = df.apply(lambda c: c.str.strip() if c.dtype == object else c)
 
-    full = _full_table(config, "dim_legal_form")
-    df.insert(0, "legal_form_key", range(1, len(df) + 1))
-    tmp_table = _full_table(config, "_tmp_legal_form_load")
-    _load_df_to_bq(client, df, tmp_table, write_disposition="WRITE_TRUNCATE")
-
-    client.query(f"""
-        MERGE `{full}` T
-        USING `{tmp_table}` S
-            ON T.unified_category = S.unified_category
-            AND T.source_system = S.source_system
-        WHEN NOT MATCHED THEN INSERT (
-            legal_form_key, unified_category, unified_category_en, nace_primary,
-            ets_classification, source_system, source_code, source_label_it
-        ) VALUES (
-            S.legal_form_key, S.unified_category, S.unified_category_en, S.nace_primary,
-            S.ets_classification, S.source_system, S.source_code, S.source_label_it
-        )
-    """).result()
-
-    client.delete_table(tmp_table, not_found_ok=True)
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  dim_legal_form: {n} rows")
-    return n
+    n_new, n_upd = _upsert_dimension(
+        client, config, "dim_legal_form", "legal_form_key", ["source_system", "source_code"], df
+    )
+    return _log_dimension(client, config, "dim_legal_form", n_new, n_upd)
 
 
 def populate_dim_indicator(client: bigquery.Client, config: dict) -> int:
     """
-    Populate dim_indicator with all known indicator rows. Safe to re-run.
+    Upsert dim_indicator with all known indicator rows. Safe to re-run.
 
-    These rows were previously in dimensions.sql as INSERT OR IGNORE statements,
-    which BigQuery does not support. They are defined here instead and loaded
-    via MERGE so re-runs do not create duplicates.
+    New indicators can be added anywhere in this list: keys are matched on
+    indicator_code, never on position.
     """
     rows = [
         # Social economy — volunteering
@@ -472,32 +560,13 @@ def populate_dim_indicator(client: bigquery.Client, config: dict) -> int:
         ("at_risk_of_poverty_rate",         "Tasso di rischio povertà",                 "At-risk-of-poverty rate",                  "percentage",         "poverty",        None),
         ("social_expenditure_pct_gdp",      "Spesa sociale % PIL",                      "Social expenditure as % of GDP",           "percentage_gdp",     "welfare",        None),
     ]
-
     ind_df = pd.DataFrame(rows, columns=[
         "indicator_code", "label_it", "label_en", "unit_default", "domain", "notes"
     ])
-    ind_df.insert(0, "indicator_key", range(1, len(ind_df) + 1))
-
-    full      = _full_table(config, "dim_indicator")
-    tmp_table = _full_table(config, "_tmp_indicator_load")
-    _load_df_to_bq(client, ind_df, tmp_table, write_disposition="WRITE_TRUNCATE")
-
-    client.query(f"""
-        MERGE `{full}` T
-        USING `{tmp_table}` S ON T.indicator_code = S.indicator_code
-        WHEN NOT MATCHED THEN INSERT (
-            indicator_key, indicator_code, label_it, label_en, unit_default, domain, notes
-        ) VALUES (
-            S.indicator_key, S.indicator_code, S.label_it, S.label_en,
-            S.unit_default, S.domain, S.notes
-        )
-    """).result()
-
-    client.delete_table(tmp_table, not_found_ok=True)
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  dim_indicator: {n} rows")
-    return n
+    n_new, n_upd = _upsert_dimension(
+        client, config, "dim_indicator", "indicator_key", ["indicator_code"], ind_df
+    )
+    return _log_dimension(client, config, "dim_indicator", n_new, n_upd)
 
 
 def populate_dimensions(client: bigquery.Client, config: dict) -> None:
@@ -674,12 +743,18 @@ def _resolve_keys(
         bad = df.loc[df["indicator_key"].isna(), "indicator_code"].unique()[:10]
         logger.warning(
             f"  {missing_ind} rows dropped: indicator_code not in dim_indicator: {list(bad)}. "
-            "Add these to the INSERT OR IGNORE block in dimensions.sql."
+            "Add these to the rows list in populate_dim_indicator()."
         )
     df = df.dropna(subset=["indicator_key"])
     df["indicator_key"] = df["indicator_key"].astype(int)
 
     # 5. LEGAL FORM (nullable — null is expected for most rows)
+    # KNOWN LIMITATION: this looks up (unified_category, None), but every row
+    # of legal_form_map.csv has a source_system, so it never matches and
+    # legal_form_key is always NULL. No current dataset carries a legal form,
+    # so nothing is lost yet. When the first one is loaded (non-profit census,
+    # RUNTS, Registro Imprese), resolve on (source_system, source_code), the
+    # natural key dim_legal_form now uses.
     if "legal_form_unified" in df.columns:
         lf_map = _build_legal_form_lookup(client, config)
         df["legal_form_key"] = df["legal_form_unified"].map(
@@ -693,9 +768,86 @@ def _resolve_keys(
 
 # ── Domain loaders ────────────────────────────────────────────────────────────
 
+def _filter_geography(df: pd.DataFrame, domain: str) -> pd.DataFrame:
+    """
+    Keep Italian territories at every level plus national (NUTS0) totals for
+    other countries. Drop Extra-Regio codes and non-Italian sub-national rows.
+
+    Rows with no nuts_code are geography the merge step could not map. They
+    used to disappear inside the 'non-IT' count; they are now reported
+    separately by dataset, because they are a mapping problem rather than
+    data we chose to exclude. Likewise, ISTAT rows dropped as 'non-Italian'
+    are impossible in principle and are reported as a warning.
+    """
+    if "nuts_code" not in df.columns:
+        return df
+
+    code = df["nuts_code"].map(lambda v: v.strip() if isinstance(v, str) else None)
+    code = code.where(~code.isin(["", "nan", "None", "<NA>"]), None)
+
+    unmatched   = code.isna()
+    extra_regio = code.str.match(EXTRA_REGIO_PATTERN, na=False)
+    in_scope    = code.str.startswith("IT", na=False) | code.str.len().eq(2)
+    keep        = in_scope & ~extra_regio & ~unmatched
+    foreign     = ~keep & ~unmatched & ~extra_regio
+
+    if unmatched.any():
+        by_ds = df.loc[unmatched, "dataset_code"].value_counts()
+        logger.warning(
+            f"  {domain}: {int(unmatched.sum()):,} rows dropped with no nuts_code "
+            "(geography not mapped in the merge step), by dataset: "
+            + ", ".join(f"{k} ({v:,})" for k, v in by_ds.items())
+        )
+    if extra_regio.any():
+        logger.info(f"  {domain}: dropped {int(extra_regio.sum()):,} Extra-Regio rows")
+    if foreign.any():
+        logger.info(f"  {domain}: dropped {int(foreign.sum()):,} non-Italian sub-national rows")
+        if "source_id" in df.columns:
+            suspicious = foreign & df["source_id"].astype(str).str.lower().eq("istat")
+            if suspicious.any():
+                sample = sorted(code[suspicious].dropna().unique())[:10]
+                logger.warning(
+                    f"  {domain}: {int(suspicious.sum()):,} of those are ISTAT rows, which "
+                    f"should all be Italian. Their codes, e.g. {sample}, are probably "
+                    "unmapped: check nuts_istat.csv and nuts_mapper.py"
+                )
+
+    out = df[keep].copy()
+    out["nuts_code"] = code[keep]
+    return out
+
+
+def _replace_fact_table(client: bigquery.Client, config: dict, table: str, df: pd.DataFrame) -> int:
+    """
+    Replace the entire contents of a fact table with df.
+
+    Each processed parquet is a complete snapshot of its domain, so the table
+    is replaced on every run. (It used to be appended to, which duplicated
+    every row each time the database stage ran.)
+
+    WRITE_TRUNCATE is atomic: if the load fails, the previous contents stay.
+    It also replaces the table's schema with that of the loaded file, so df is
+    first aligned to the existing schema (missing columns added as NULL),
+    which keeps the schema exactly as fact_tables.sql defines it.
+    """
+    full = _full_table(config, table)
+    schema_cols = [f.name for f in client.get_table(full).schema]
+    unknown = [c for c in df.columns if c not in schema_cols]
+    if unknown:
+        logger.warning(f"  {table}: columns not in the table schema, not loaded: {unknown}")
+
+    df = df.reindex(columns=schema_cols)
+    df["fact_key"] = range(1, len(df) + 1)
+    _load_df_to_bq(client, df, full, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+
+    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
+    logger.info(f"  {table}: replaced, {n:,} rows")
+    return n
+
+
 @domain_loader("social_economy")
 def _load_social_economy(client: bigquery.Client, config: dict) -> int:
-    """Load the social economy processed parquet into fact_social_economy."""
+    """Replace fact_social_economy with the latest social economy processed parquet."""
     uri = _find_latest_processed(config, "social_economy")
     if uri is None:
         logger.warning("social_economy: no processed parquet found — skipping.")
@@ -708,12 +860,7 @@ def _load_social_economy(client: bigquery.Client, config: dict) -> int:
     qa_cols = ["geo_unmatched", "legal_form_unmatched"]
     df = df.drop(columns=[c for c in qa_cols if c in df.columns])
 
-    # Geo filter: keep Italian territories and NUTS0 country totals only
-    if "nuts_code" in df.columns:
-        mask = df["nuts_code"].str.startswith("IT", na=False) | df["nuts_code"].str.len().eq(2)
-        before = len(df)
-        df = df[mask].copy()
-        logger.info(f"  Filtered out {before - len(df)} granular non-IT rows.")
+    df = _filter_geography(df, "social_economy")
 
     geo_lookup = _build_geo_lookup(client, config)
     if "nuts_code" in df.columns:
@@ -725,9 +872,6 @@ def _load_social_economy(client: bigquery.Client, config: dict) -> int:
     if df.empty:
         logger.warning("social_economy: all rows dropped during key resolution.")
         return 0
-
-    start_key = _next_surrogate_key(client, config, "fact_social_economy", "fact_key")
-    df["fact_key"] = range(start_key, start_key + len(df))
 
     fact_columns = [
         "fact_key", "geo_key", "time_key", "source_key", "indicator_key",
@@ -742,21 +886,15 @@ def _load_social_economy(client: bigquery.Client, config: dict) -> int:
         "association_type",
         "dataset_code", "extracted_at",
     ]
-    available = [c for c in fact_columns if c in df.columns]
-    df = df[available]
+    df = df[[c for c in fact_columns if c in df.columns]]
 
-    full = _full_table(config, "fact_social_economy")
-    _load_df_to_bq(client, df, full, write_disposition="WRITE_APPEND")
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  fact_social_economy: {n:,} rows total")
-    return n
+    return _replace_fact_table(client, config, "fact_social_economy", df)
 
 
 @domain_loader("labour")
 def _load_labour(client: bigquery.Client, config: dict) -> int:
     """
-    Load the labour processed parquet into fact_labour.
+    Replace fact_labour with the latest labour processed parquet.
 
     Geography strategy:
       - All NUTS0 national totals (2-char codes) for every country.
@@ -775,16 +913,7 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
     qa_cols = ["geo_unmatched", "legal_form_unmatched"]
     df = df.drop(columns=[c for c in qa_cols if c in df.columns])
 
-    if "nuts_code" in df.columns:
-        mask = (
-            df["nuts_code"].str.len().eq(2) |
-            df["nuts_code"].str.startswith("IT", na=False)
-        )
-        before = len(df)
-        df = df[mask].copy()
-        dropped = before - len(df)
-        if dropped:
-            logger.info(f"  Geo filter: dropped {dropped:,} non-IT sub-national rows.")
+    df = _filter_geography(df, "labour")
 
     geo_lookup = _build_geo_lookup(client, config)
     if "nuts_code" in df.columns:
@@ -801,9 +930,6 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
         logger.warning("labour: all rows dropped during key resolution.")
         return 0
 
-    start_key = _next_surrogate_key(client, config, "fact_labour", "fact_key")
-    df["fact_key"] = range(start_key, start_key + len(df))
-
     fact_columns = [
         "fact_key", "geo_key", "time_key", "source_key", "indicator_key",
         "value", "unit",
@@ -813,17 +939,9 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
         "nace_code", "nace_label_en",
         "dataset_code", "extracted_at",
     ]
-    for col in fact_columns:
-        if col not in df.columns:
-            df[col] = None
-    df = df[fact_columns]
+    df = df[[c for c in fact_columns if c in df.columns]]
 
-    full = _full_table(config, "fact_labour")
-    _load_df_to_bq(client, df, full, write_disposition="WRITE_APPEND")
-
-    n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-    logger.info(f"  fact_labour: {n:,} rows total")
-    return n
+    return _replace_fact_table(client, config, "fact_labour", df)
 
 
 # ── When adding a new domain, copy this template: ────────────────────────────
@@ -840,6 +958,7 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
 #
 #     qa_cols = ["geo_unmatched", "legal_form_unmatched"]
 #     df = df.drop(columns=[c for c in qa_cols if c in df.columns])
+#     df = _filter_geography(df, "immigration")
 #
 #     geo_lookup = _build_geo_lookup(client, config)
 #     if "nuts_code" in df.columns:
@@ -851,9 +970,6 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
 #     if df.empty:
 #         return 0
 #
-#     start_key = _next_surrogate_key(client, config, "fact_immigration", "fact_key")
-#     df["fact_key"] = range(start_key, start_key + len(df))
-#
 #     fact_columns = [
 #         "fact_key", "geo_key", "time_key", "source_key", "indicator_key",
 #         "value", "unit",
@@ -861,14 +977,8 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
 #         "gender", "age_group",
 #         "dataset_code", "extracted_at",
 #     ]
-#     available = [c for c in fact_columns if c in df.columns]
-#     df = df[available]
-#
-#     full = _full_table(config, "fact_immigration")
-#     _load_df_to_bq(client, df, full, write_disposition="WRITE_APPEND")
-#     n = _run_query(client, f"SELECT COUNT(*) FROM `{full}`")[0][0]
-#     logger.info(f"  fact_immigration: {n:,} rows total")
-#     return n
+#     df = df[[c for c in fact_columns if c in df.columns]]
+#     return _replace_fact_table(client, config, "fact_immigration", df)
 
 
 # ── Main build function ───────────────────────────────────────────────────────
@@ -876,7 +986,7 @@ def _load_labour(client: bigquery.Client, config: dict) -> int:
 def build_database(
     domains: list[str] | None = None,
     config: dict | None = None,
-) -> None:
+) -> dict[str, dict]:
     """
     Build the aiccon BigQuery dataset from processed parquet files in GCS.
 
@@ -887,6 +997,12 @@ def build_database(
         registered in DOMAIN_LOADERS and enabled in settings.yaml.
     config : dict, optional
         Pre-loaded config. Loaded from disk if not provided.
+
+    Returns
+    -------
+    dict
+        Per-domain results: {domain: {"status": "success" | "error", "rows": n, ...}}.
+        A failed domain does not stop the others, so callers must check this.
     """
     cfg = config or load_config()
 
@@ -968,6 +1084,8 @@ def build_database(
         "bigquery_dataset": f"{cfg['bigquery']['project']}.{cfg['bigquery']['dataset']}",
     })
 
+    return domain_results
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -988,5 +1106,5 @@ if __name__ == "__main__":
     args = parse_args()
     config  = load_config(settings_path=args.config)
     domains = [args.domain] if args.domain else None
-    build_database(domains=domains, config=config)
-    sys.exit(0)
+    results = build_database(domains=domains, config=config)
+    sys.exit(1 if any(r["status"] == "error" for r in results.values()) else 0)
