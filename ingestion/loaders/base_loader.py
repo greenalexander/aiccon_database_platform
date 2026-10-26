@@ -7,7 +7,7 @@ Every API source (eurostat.py, istat.py, etc.) inherits from BaseLoader.
 Responsibilities:
 - Load config (settings.yaml + .env)
 - Set up logging
-- Provide retry-wrapped HTTP requests
+- Provide retry-wrapped HTTP requests, paced for rate-limited hosts (ISTAT)
 - Save raw data as parquet with a standard schema (written locally then uploaded to GCS)
 - Track what was fetched in a simple manifest (written to GCS)
 """
@@ -18,10 +18,12 @@ import json
 import logging
 import os
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -181,6 +183,31 @@ def _upload_string_to_gcs(
 
 _logger = get_logger("base_loader")
 
+# Minimum seconds between the starts of two requests to the same host.
+# ISTAT allows 5 queries per minute per IP address and blocks addresses that
+# exceed it for one to two days (istat.it, "SDMX web services"). 13 seconds
+# keeps every rolling minute at 5 requests or fewer. Retries are requests too,
+# so the wait applies to every attempt, not just the first.
+MIN_REQUEST_INTERVAL: dict[str, float] = {
+    "esploradati.istat.it": 13.0,
+}
+_last_request_start: dict[str, float] = {}
+
+
+def _wait_for_host_slot(url: str, logger: logging.Logger) -> None:
+    """Sleep if needed so requests to a rate-limited host stay under its limit."""
+    host = urlparse(url).hostname or ""
+    interval = MIN_REQUEST_INTERVAL.get(host)
+    if interval is None:
+        return
+    last = _last_request_start.get(host)
+    if last is not None:
+        wait = interval - (time.monotonic() - last)
+        if wait > 0:
+            logger.info(f"Pacing requests to {host}: waiting {wait:.1f}s")
+            time.sleep(wait)
+    _last_request_start[host] = time.monotonic()
+
 
 def make_retry_session(
     total_attempts: int = 5,
@@ -209,6 +236,7 @@ def make_retry_session(
         reraise=True,
     )
     def _get(url: str, **kwargs) -> requests.Response:
+        _wait_for_host_slot(url, lg)
         # (connect timeout, read timeout) in seconds. The read timeout is
         # generous because some ISTAT requests (e.g. FORZLVMENS1_1, every
         # month since 2015) take more than a minute before data starts arriving.
