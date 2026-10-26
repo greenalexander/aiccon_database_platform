@@ -6,6 +6,94 @@ Entry added whenever a non-obvious choice is made about data scope, source prior
 
 ---
 
+## 2026-10-26: Automation with GitHub Actions
+
+The following decisions were taken together when the pipeline was moved from manual runs on a laptop to GitHub Actions.
+
+### One workflow file for scheduled and manual runs
+
+**Decision.** A single workflow, `.github/workflows/pipeline.yml`, with two triggers: a monthly `schedule` and `workflow_dispatch` (manual runs with a choice of stage, domain and whether to run the integrity checks). This replaces the two files (`monthly_pipeline.yml`, `manual_pipeline.yml`) the README originally planned.
+
+**Why.** Both would run identical steps. Two copies of the same job drift apart over time.
+
+### Workload Identity Federation instead of a service account key
+
+**Context.** The runner needs Google Cloud credentials. The simple option is a service account key stored as a GitHub secret.
+
+**Decision.** Workload Identity Federation with service account impersonation. Pool `github`, provider `aiccon-data-repo`, attribute condition `assertion.repository == 'greenalexander/aiccon_database_platform'`, impersonating `github-actions-pipeline@aiccon-database-platform.iam.gserviceaccount.com`.
+
+**Why.** A key is a long-lived password: valid until deleted and usable from any machine if it leaks. With federation, nothing long-lived is stored; each run receives a short-lived token, and only workflows from this repository are accepted. Impersonating a service account (rather than granting roles directly to the GitHub identity) was chosen because it is the most widely used pattern and works with every client library the pipeline uses, including `gcsfs`.
+
+**Consequences.** Renaming or moving the repository breaks authentication until the attribute condition and the `workloadIdentityUser` binding are updated. Federation errors are terse; the auth action's troubleshooting guide recommends waiting at least five minutes after any change to the pool or provider before testing.
+
+### A dedicated, least-privilege service account for CI
+
+**Decision.** GitHub Actions uses its own service account with `roles/storage.objectAdmin` on the bucket only, and `roles/bigquery.dataEditor` and `roles/bigquery.jobUser` on the project. The local account `aiccon-pipeline` is unchanged (it keeps `roles/storage.admin`, by choice).
+
+**Why.** Separate accounts make automated activity identifiable in the audit logs, allow either to be revoked without breaking the other, and limit what the CI identity can do to what the pipeline needs. BigQuery roles are granted at project level because the project holds nothing else, so restricting them to the dataset would add complexity for little gain.
+
+### Configuration as repository variables, not secrets
+
+**Decision.** The workflow reads `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCS_BUCKET`, `BQ_PROJECT` and `BQ_DATASET` from GitHub repository variables. No secrets are used.
+
+**Why.** None of these values is a credential; with federation, proof of identity is the per-run token. Secrets are masked in logs, which only makes typos harder to diagnose. Variables are kept in GitHub rather than in the workflow file so that future workflows (dbt, Gemini) can share them.
+
+### `requirements.txt` for CI, `uv.lock` later
+
+**Context.** Locally the environment is managed by uv. The old `requirements.txt` was a Windows `pip freeze` that would not install on Linux (an editable install from a local path, and the Windows-only `pywinpty`). `pyproject.toml` lists development tools (Jupyter, DuckDB, office365 client) as runtime dependencies, does not declare three packages the code imports directly (`google-cloud-bigquery`, `google-cloud-storage`, `PyYAML`), and includes `pandas-gbq`, which the code does not appear to use.
+
+**Decision.** `requirements.txt` now lists only the runtime imports, pinned to the tested local versions, and GitHub Actions installs from it with pip. Verified by installing it into a clean virtual environment and running the database stage and the integrity checks.
+
+**Why.** Installing from `pyproject.toml` as it stands would install Jupyter on every run and rely on transitive dependencies for core libraries.
+
+**Consequences.** Until `pyproject.toml` is tidied, any new runtime dependency must be added to both files. A forgotten one fails the GitHub run with `ModuleNotFoundError`. Once tidied (best done when dbt is added), GitHub Actions should install from `uv.lock` and `requirements.txt` can be retired.
+
+### Python 3.12 on the runner
+
+**Decision.** The runner uses Python 3.12, matching the local uv interpreter (3.12.13). The README previously said 3.11.
+
+### Pace ISTAT requests 13 seconds apart
+
+**Context.** ISTAT's SDMX service allows 5 queries per minute per IP address and blocks addresses that exceed it for one to two days. The two ISTAT fetchers send 22 requests in sequence, and failed requests are retried up to five times.
+
+**Decision.** `base_loader.py` enforces at least 13 seconds between the starts of any two requests to `esploradati.istat.it`, retries included, with one clock shared by all loaders in the process.
+
+**Why.** Pacing in the shared session covers retries and the boundary between the social economy and labour loaders, which per-fetcher pacing would not. It adds up to about five minutes per full run. Eurostat is not paced: its limits are unknown and it has never caused problems.
+
+### Integrity checks run even when the pipeline fails
+
+**Decision.** The integrity-check step runs unless the run was cancelled or never reached the pipeline step. The run is marked as failed if either the pipeline or the checks fail. WARN results never fail a run.
+
+**Why.** After a partial failure (for example one ISTAT dataset falling back to last month's file), the checks show what state the database was actually left in.
+
+### Accept the known NUTS3 gap (105 of 107 provinces) in the labour check
+
+**Decision.** The labour integrity check expects at least 105 provinces with data rather than 107.
+
+**Why.** Two provinces are missing, a known data issue deferred for now. Leaving the check at 107 would make every scheduled run fail, and failure emails would stop carrying information. At 105 a red run means something new, and any further loss of coverage still fails.
+
+**Consequences.** Restore 107 once the two provinces are mapped.
+
+### No automatic retry of failed runs
+
+**Context.** ISTAT's SDMX service has frequent outages, from a few hours to about a day (several in October 2026, including one on 26 October during testing, while the ISTAT data browser kept working).
+
+**Decision.** No second scheduled attempt and no early stop when ISTAT is down. A run that fails because of ISTAT is re-run by hand once the service is back.
+
+**Why.** For a monthly pipeline a manual re-run is cheap, and the failure email is the prompt.
+
+### Schedule time
+
+**Decision.** `17 6 1 * *`: 06:17 UTC on the 1st of each month. Cron schedules in GitHub Actions run in UTC (an optional time-zone field exists but is unnecessary here).
+
+**Why.** GitHub delays scheduled runs at busy times, especially at the top of the hour, so the minute is deliberately not :00.
+
+### Keeping the schedule active
+
+**Context.** In public repositories GitHub disables scheduled workflows after 60 days without repository activity.
+
+**Decision.** No keep-alive automation. During active development regular commits prevent it; otherwise, respond to GitHub's warning email with a commit (an empty commit should do) or re-enable the workflow from the Actions tab afterwards.
+
 ## Architecture
 
 ### Decision: synced SharePoint drive rather than SharePoint API

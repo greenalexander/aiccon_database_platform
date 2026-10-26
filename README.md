@@ -1,10 +1,10 @@
-This project is under active development. The architecture diagram and stack table reflect the target state.
+This project is under active development. The architecture diagram and stack table describe the target state; components marked *planned* are not built yet.
 
 # aiccon-data
 
-A contextual statistics platform for social economy research. Collects data from European and Italian public APIs, harmonises it into a unified star-schema database organised by thematic domain — social economy, labour market, welfare, immigration, poverty, SDGs, and housing — and serves it through PowerBI dashboards and a natural language query interface.
+A contextual statistics platform for social economy research. Collects data from European and Italian public APIs, harmonises it into a unified star-schema database organised by thematic domain (social economy, labour market, welfare, immigration, poverty, SDGs and housing) and serves it through PowerBI dashboards and, later, a natural language query interface.
 
-The pipeline runs monthly on a schedule via GitHub Actions, writes intermediate artefacts to Google Cloud Storage, and loads the final dataset into BigQuery. An LLM-powered summary is generated automatically after each refresh. A Streamlit app allows natural language querying of the database via Gemini.
+The pipeline runs automatically on the 1st of each month via GitHub Actions. It writes intermediate artefacts to Google Cloud Storage, loads the final dataset into BigQuery and then runs integrity checks against it. The same workflow can be started by hand from GitHub, for any stage and domain.
 
 ---
 
@@ -12,14 +12,16 @@ The pipeline runs monthly on a schedule via GitHub Actions, writes intermediate 
 
 | Layer | Technology | Why |
 |---|---|---|
-| Ingestion & processing | Python 3.11 | Mature SDMX/API client ecosystem; `pandas` and `pyarrow` for parquet |
-| Intermediate storage | Google Cloud Storage | Durable, versioned parquet staging between pipeline stages; free tier sufficient for this data volume |
-| Analytical database | BigQuery | Serverless, scalable, native PowerBI connector; SQL-compatible with DuckDB used in local dev |
-| Transformation layer | dbt (BigQuery adapter) | Declarative SQL models, built-in testing, auto-generated documentation; clean separation of raw → staging → mart |
-| Orchestration / CI/CD | GitHub Actions | Scheduled monthly runs, per-stage manual triggers, no infrastructure to manage |
-| GenAI summaries | Gemini API (gemini-1.5-flash) | Monthly plain-language digest generated automatically post-refresh; cost-free on free tier at this call volume |
-| NL query interface | Streamlit + Gemini | Text-to-SQL over the BigQuery schema; deployed on Streamlit Community Cloud |
-| Local development | DuckDB | Fast local iteration against parquet files without a cloud connection |
+| Ingestion & processing | Python 3.12 | Mature SDMX/API client ecosystem; `pandas` and `pyarrow` for parquet |
+| Intermediate storage | Google Cloud Storage | Durable parquet staging between pipeline stages; free tier sufficient for this data volume |
+| Analytical database | BigQuery | Serverless, native PowerBI connector |
+| Integrity checks | Python (`database/tests/test_integrity.py`) | Row counts, nulls, key uniqueness, orphan keys, coverage and freshness checks after every load |
+| Orchestration / CI/CD | GitHub Actions | Scheduled monthly run plus manual runs by stage and domain; no infrastructure to manage; free for public repositories |
+| Cloud authentication from CI | Workload Identity Federation | No long-lived service account key stored anywhere (see `docs/decisions.md`) |
+| Transformation layer (*planned*) | dbt (BigQuery adapter) | Declarative SQL models, built-in testing, generated documentation; raw → staging → mart |
+| GenAI summaries (*planned*) | Gemini API | Monthly plain-language digest generated after each refresh |
+| NL query interface (*planned*) | Streamlit + Gemini | Text-to-SQL over the BigQuery schema |
+| Local development | uv, DuckDB | uv manages the local Python environment; DuckDB for quick local exploration of parquet files |
 
 ---
 
@@ -28,29 +30,30 @@ The pipeline runs monthly on a schedule via GitHub Actions, writes intermediate 
 ```
 APIs (Eurostat, ISTAT)
         ↓  ingest
-raw parquet files (GCS: aiccon-data/raw/)
+raw parquet files (GCS: aiccon-data/raw/{domain}/)
         ↓  process
-processed parquet files (GCS: aiccon-data/processed/)
-        ↓  dbt (staging → marts)
+processed parquet files (GCS: aiccon-data/processed/{domain}/)
+        ↓  database (build_db.py; dbt planned)
 BigQuery dataset (aiccon_data)
+        ↓  integrity checks (test_integrity.py)
         ↓                    ↓
-PowerBI dashboards     Streamlit NL query app
+PowerBI dashboards     Streamlit NL query app (planned)
                              ↓
-                    Gemini monthly summary
+                    Gemini monthly summary (planned)
 ```
 
-GitHub Actions triggers the full pipeline on the first of each month, then calls the Gemini summary generation step. Individual stages can also be triggered manually via `workflow_dispatch`.
+GitHub Actions runs ingest → process → database → integrity checks on the 1st of each month. Any stage and domain can also be run by hand from the Actions tab (see [Automated runs (GitHub Actions)](#automated-runs-github-actions)).
 
 ---
 
 ## Thematic domains
 
-The database is organised into thematic domains. Each domain is a self-contained set of datasets sharing the same geographic and time dimensions. All domains share the same dimension tables — adding a new domain never requires changing existing tables.
+The database is organised into thematic domains. Each domain is a self-contained set of datasets sharing the same geographic and time dimensions. All domains share the same dimension tables, so adding a new domain never requires changing existing tables.
 
 | Domain | Status | Description |
 |---|---|---|
 | **Social economy** | ✅ Active | Volunteering rates, associationism, employment in social sectors, local units by NACE |
-| **Labour** | ✅ Active | Employment, unemployment and inactivity rates, NEETs, labour force by NACE — Italy (NUTS3) and EU comparison |
+| **Labour** | ✅ Active | Employment, unemployment and inactivity rates, NEETs, labour force by NACE: Italy (NUTS3) and EU comparison |
 | **Immigration** | 🔲 Stub | Resident foreign population, permits, asylum applications |
 | **Welfare** | 🔲 Stub | Social spending, services, long-term care |
 | **Poverty** | 🔲 Stub | At-risk-of-poverty, material deprivation, inequality |
@@ -68,7 +71,9 @@ New domains can be added without modifying the existing database structure. See 
 | Source | Access | Coverage |
 |---|---|---|
 | Eurostat | SDMX / JSON API | EU27, NUTS0–2, all available years |
-| ISTAT | SDMX API (esploradati.istat.it) | Italy, NUTS0–3, all available years |
+| ISTAT | SDMX REST API (`esploradati.istat.it/SDMXWS/rest`) | Italy, NUTS0–3, all available years |
+
+ISTAT limits its SDMX service to 5 queries per minute per IP address and blocks addresses that exceed it for one to two days. `base_loader.py` therefore spaces requests to ISTAT at least 13 seconds apart, retries included. This adds up to about five minutes to a full run.
 
 ### Manual downloads (not automated)
 
@@ -86,112 +91,104 @@ Manual files are stored in `ingestion/manual_sources/` and are **not committed t
 ## Repository structure
 
 ```
-aiccon-data-platform/
+aiccon_database_platform/
 ├── ingestion/
 │   ├── api_sources/
 │   │   ├── social_economy/
-│   │   │   ├── eurostat.py        fetches Eurostat social economy datasets
-│   │   │   └── istat.py           fetches ISTAT social economy datasets
+│   │   │   ├── eurostat.py          fetches Eurostat social economy datasets
+│   │   │   └── istat.py             fetches ISTAT social economy datasets
 │   │   └── labour/
-│   │       ├── eurostat.py        fetches Eurostat labour market datasets
-│   │       └── istat.py           fetches ISTAT labour market datasets (RFL)
+│   │       ├── eurostat_labour.py   fetches Eurostat labour market datasets
+│   │       └── istat_labour.py      fetches ISTAT labour market datasets (RFL)
 │   ├── loaders/
-│   │   ├── base_loader.py         shared base class, retry logic, parquet I/O
-│   │   └── gcs_uploader.py        writes raw and processed parquet to GCS
-│   └── manual_sources/            raw downloaded files — gitignored
+│   │   ├── base_loader.py           shared base class, retry logic, ISTAT pacing, parquet I/O
+│   │   └── gcs_uploader.py          writes raw and processed parquet to GCS
+│   └── manual_sources/              raw downloaded files (gitignored)
 │
 ├── processing/
 │   ├── harmonise/
-│   │   ├── nuts_mapper.py         ISTAT codes → NUTS codes
-│   │   └── legal_form.py          source legal forms → unified categories
+│   │   ├── nuts_mapper.py           ISTAT codes → NUTS codes
+│   │   └── legal_form_normaliser.py source legal forms → unified categories
 │   ├── integrate/
-│   │   ├── merge_social_economy.py harmonise + merge all social economy sources
-│   │   └── merge_labour.py         harmonise + merge all labour sources
+│   │   ├── merge_social_economy.py  harmonise + merge all social economy sources
+│   │   └── merge_labour.py          harmonise + merge all labour sources
 │   ├── mappings/
-│   │   ├── nuts_istat.csv         NUTS ↔ ISTAT territorial codes (all 107 provinces)
-│   │   ├── legal_form_map.csv     Italian legal forms ↔ unified categories ↔ NACE
-│   │   ├── nace_labels.csv        NACE Rev.2 codes with Italian/English labels
-│   │   ├── sdg_indicators.csv     SDG goal+target ↔ ISTAT/Eurostat indicator codes
-│   │   └── domain_sources.csv     source registry with priority and coverage
-│   └── pipeline.py                orchestrates ingestion and processing for all active domains
-│
-├── dbt/
-│   ├── models/
-│   │   ├── staging/               one model per raw source, light cleaning only
-│   │   └── marts/                 joined, business-logic models consumed by PowerBI and the query app
-│   ├── tests/                     dbt schema tests (not_null, unique, referential integrity)
-│   ├── dbt_project.yml
-│   └── profiles.yml.example       BigQuery connection template
+│   │   ├── nuts_istat.csv           NUTS 2024 ↔ ISTAT territorial codes (all 107 provinces)
+│   │   ├── legal_form_map.csv       Italian legal forms ↔ unified categories ↔ NACE
+│   │   ├── nace_labels.csv          NACE Rev.2 codes with Italian/English labels
+│   │   ├── sdg_indicators.csv       SDG goal+target ↔ ISTAT/Eurostat indicator codes
+│   │   └── domain_sources.csv       source registry with priority and coverage
+│   └── pipeline.py                  orchestrates processing for all active domains
 │
 ├── database/
+│   ├── build_db.py                  loads processed parquet from GCS into BigQuery
 │   ├── schema/
-│   │   ├── dimensions.sql         shared dimension tables (geo, time, source, indicator)
-│   │   ├── fact_tables.sql        one fact table per domain, stubs for future domains
-│   │   └── views.sql              analytical views (legacy; superseded by dbt marts)
+│   │   ├── dimensions.sql           shared dimension tables (geo, time, source, legal form, indicator)
+│   │   ├── fact_tables.sql          one fact table per domain, stubs for future domains
+│   │   └── views.sql                analytical views (legacy; to be superseded by dbt marts)
 │   └── tests/
-│       └── test_integrity.py      row counts, null checks, orphan key checks
+│       └── test_integrity.py        post-load integrity checks (see "Integrity checks")
 │
-├── genai/
-│   ├── summarise.py               generates monthly plain-language digest via Gemini
-│   └── prompts/
-│       └── monthly_summary.txt    prompt template for the summary generation step
-│
-├── query_app/
-│   ├── app.py                     Streamlit NL query interface
-│   ├── sql_generator.py           text-to-SQL via Gemini with schema injection
-│   └── query_handler.py           BigQuery execution, error handling, result formatting
+├── dbt/                             (planned) staging and mart models
+├── genai/                           (planned) Gemini monthly summary
+├── query_app/                       (planned) Streamlit NL query interface
 │
 ├── .github/
 │   └── workflows/
-│       ├── monthly_pipeline.yml   scheduled full run (1st of month) + summary generation
-│       └── manual_pipeline.yml    workflow_dispatch with stage and domain inputs
+│       └── pipeline.yml             monthly schedule + manual runs, then integrity checks
 │
 ├── config/
-│   ├── settings.yaml              GCS paths, BigQuery dataset, active domains, API scope
-│   └── .env.example               credential template (copy to .env)
+│   ├── settings.yaml                GCS layout, BigQuery location, active domains, API scope
+│   └── .env.example                 template for local environment variables (copy to .env)
 │
 ├── docs/
-│   ├── data_dictionary.md         field definitions and units for every table
-│   ├── source_log.md              download dates, dataset codes, known issues
-│   ├── decisions.md               architectural and data decisions with rationale
-│   └── maintenance.md             how to add new domains
+│   ├── data_dictionary.md           field definitions and units for every table
+│   ├── source_log.md                download dates, dataset codes, known issues
+│   ├── decisions.md                 architectural and data decisions with rationale
+│   └── maintenance.md               how to add new domains
 │
-├── run_pipeline.py                entry point: ingest → process → dbt run → integrity checks
-├── requirements.txt
+├── run_pipeline.py                  entry point: ingest → process → database
+├── requirements.txt                 runtime dependencies, pinned (used by GitHub Actions)
+├── pyproject.toml, uv.lock          local environment managed by uv
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## Setup
+## Setup (local)
 
-**Requirements**: Python 3.11+, Google Cloud SDK, dbt-bigquery
+**Requirements**: Python 3.12, [uv](https://docs.astral.sh/uv/), access to the GCP project `aiccon-database-platform`.
 
-```bash
-git clone <repo-url>
-cd aiccon-data
-pip install -r requirements.txt
-cp config/.env.example config/.env
+```powershell
+git clone https://github.com/greenalexander/aiccon_database_platform.git
+cd aiccon_database_platform
+uv sync
+copy config\.env.example config\.env
 ```
 
-**GCP credentials**: The pipeline authenticates via a service account. For local development, download the service account key JSON and set:
+`uv sync` creates `.venv` from `uv.lock`. Alternatively, `pip install -r requirements.txt` in any Python 3.12 environment installs exactly what the pipeline needs (this is what GitHub Actions does).
 
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
-```
+**Dependencies.** `requirements.txt` lists only the packages the code imports at runtime, pinned to tested versions. When you add a package the pipeline imports (`uv add ...`), add it to `requirements.txt` as well, or the GitHub run will fail with `ModuleNotFoundError`. Tidying `pyproject.toml` so that GitHub Actions can install from `uv.lock` instead is an open item.
 
-In GitHub Actions, credentials are stored as a repository secret (`GCP_SA_KEY`) and injected at runtime — no key files are committed.
+**Environment variables.** Edit `config/.env` and set:
 
-Edit `config/.env` and set `GCS_BUCKET`, `BQ_PROJECT`, and `BQ_DATASET` to your GCP resource names.
+| Variable | Value |
+|---|---|
+| `GCS_BUCKET` | `data-aiccon-database-platform` |
+| `BQ_PROJECT` | `aiccon-database-platform` |
+| `BQ_DATASET` | `aiccon_data` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | path to the local service account key, e.g. `config/service-account-key.json` |
 
-**dbt**: Copy `dbt/profiles.yml.example` to `~/.dbt/profiles.yml` and fill in your BigQuery project details.
+The code loads `config/.env` if it exists but never overrides variables that are already set, so the same code runs unchanged in GitHub Actions, where no `.env` exists.
+
+**Local GCP credentials.** Local runs authenticate as the service account `aiccon-pipeline@aiccon-database-platform.iam.gserviceaccount.com` using a key file. The key must never be committed: `.gitignore` excludes `.env` and every `*.json` file. GitHub Actions does **not** use this key (see below).
 
 ---
 
 ## Running the pipeline
 
-**Full monthly update** (all stages, all active domains):
+**Full update** (all stages, all active domains):
 ```bash
 python run_pipeline.py
 ```
@@ -200,40 +197,123 @@ python run_pipeline.py
 ```bash
 python run_pipeline.py --stage ingest     # fetch from APIs, write raw parquet to GCS
 python run_pipeline.py --stage process    # re-process existing raw files
-python run_pipeline.py --stage database   # run dbt models only (fastest)
+python run_pipeline.py --stage database   # reload BigQuery from processed files (fastest)
 ```
 
-**Single domain** (useful when building or debugging a new domain):
+**Single domain** (useful when building or debugging a domain):
 ```bash
 python run_pipeline.py --domain social_economy
 ```
 
-**Generate monthly summary only**:
-```bash
-python genai/summarise.py
-```
-
-**Integrity checks** (run after every pipeline execution):
+**Integrity checks** (run automatically after every GitHub run):
 ```bash
 python -m database.tests.test_integrity
+python -m database.tests.test_integrity --domain labour
 ```
+
+The pipeline exits with code 1 if any stage fails, including a dataset that an API failed to return. Later stages still run: if a download fails, processing falls back to the previous raw file for that dataset.
 
 ### When to run which stage
 
 | Situation | Command |
 |---|---|
-| Monthly update | `python run_pipeline.py` |
-| Fixed a mapping CSV, no new data | `python run_pipeline.py --stage process` then `--stage database` |
-| Fixed a bug in a dbt model | `python run_pipeline.py --stage database` |
-| Building a new domain | `python run_pipeline.py --domain {new_domain}` |
+| Monthly update | Automatic (GitHub Actions), or `python run_pipeline.py` |
+| Fixed a mapping CSV, no new data needed | `--stage process`, then `--stage database` |
+| Fixed a bug in the database loader | `--stage database` |
+| Building a new domain | `--domain {new_domain}` |
 
-### Debugging failures
+---
 
-1. Read terminal output — `ERROR` lines include the full Python traceback
-2. Check `pipeline_log.json` in GCS `aiccon-data/database/` for a structured JSON summary
+## Automated runs (GitHub Actions)
+
+The workflow is defined in `.github/workflows/pipeline.yml`.
+
+### When it runs
+
+- **Scheduled:** at 06:17 UTC on the 1st of every month (07:17 Italian time in winter, 08:17 in summer). Cron schedules in GitHub Actions are in UTC. GitHub may start scheduled runs late at busy times, which is why the minute is not :00.
+- **Manually:** on GitHub, go to **Actions → Monthly pipeline → Run workflow**, choose a stage (`all`, `ingest`, `process`, `database`) and a domain (`all`, `social_economy`, `labour`), and tick or untick the integrity checks. `--stage database` is a quick test: it takes about two minutes and makes no API calls.
+
+Only one run can be active at a time; a run started while another is in progress waits for it.
+
+### What a run does
+
+1. Checks out the repository on a fresh Ubuntu 24.04 machine (a GitHub-hosted *runner*).
+2. Authenticates to Google Cloud with Workload Identity Federation.
+3. Installs Python 3.12 and `requirements.txt`.
+4. Runs `python run_pipeline.py` with the chosen stage and domain.
+5. Runs the integrity checks. They run **even if the pipeline failed**, but not if the run was cancelled or never reached the pipeline step.
+
+The run is marked as failed if either the pipeline or the integrity checks fail. The integrity report appears on the run's **Summary** page.
+
+### Authentication: Workload Identity Federation
+
+No service account key is stored in GitHub. On each run, GitHub issues a short-lived signed token identifying the repository; Google exchanges it for a short-lived token for a dedicated service account. The rationale is in `docs/decisions.md`.
+
+| Component | Value |
+|---|---|
+| Workload identity pool | `github` (global) |
+| Provider | `aiccon-data-repo`, issuer `https://token.actions.githubusercontent.com` |
+| Attribute condition | `assertion.repository == 'greenalexander/aiccon_database_platform'` |
+| Service account | `github-actions-pipeline@aiccon-database-platform.iam.gserviceaccount.com` |
+| Its roles | `roles/storage.objectAdmin` on the bucket; `roles/bigquery.dataEditor` and `roles/bigquery.jobUser` on the project |
+| Who may impersonate it | `roles/iam.workloadIdentityUser` granted to `principalSet://…/workloadIdentityPools/github/attribute.repository/greenalexander/aiccon_database_platform` |
+
+**If the repository is renamed or moved** (for example to an AICCON organisation account), authentication will stop working until both the attribute condition and the `workloadIdentityUser` binding are updated to the new `owner/repo` name.
+
+### Configuration: repository variables
+
+The workflow reads five **repository variables** (Settings → Secrets and variables → Actions → Variables). None of them is a credential, so no **secrets** are used.
+
+| Variable | Value |
+|---|---|
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/1080974298195/locations/global/workloadIdentityPools/github/providers/aiccon-data-repo` |
+| `GCP_SERVICE_ACCOUNT` | `github-actions-pipeline@aiccon-database-platform.iam.gserviceaccount.com` |
+| `GCS_BUCKET` | `data-aiccon-database-platform` |
+| `BQ_PROJECT` | `aiccon-database-platform` |
+| `BQ_DATASET` | `aiccon_data` |
+
+### Notifications
+
+GitHub emails the outcome of a run according to your personal notification settings (the Actions section of your GitHub notification settings, where you can choose to be notified of failed runs only). Notifications for **manual** runs go to whoever started the run. Notifications for **scheduled** runs go to whoever created the workflow or last edited its `cron` line, or to whoever last re-enabled the workflow after it was disabled.
+
+### When a run fails
+
+1. Open the run in the Actions tab, click the job **pipeline**, and expand the step with the red cross. The cog icon offers the raw log.
+2. Check the run's **Summary** page for the integrity report.
+3. If ISTAT is the cause (HTTP 500 errors from `esploradati.istat.it`), check `https://esploradati.istat.it/SDMXWS/rest/dataflow/all/all/latest` in a browser. When it returns XML again, re-run the workflow by hand. ISTAT's SDMX service has outages lasting hours to a day; the data browser can work while the SDMX service does not. There is deliberately no automatic retry.
+4. Otherwise, follow [Debugging failures](#debugging-failures).
+
+### Keeping the schedule alive
+
+In public repositories, GitHub disables scheduled workflows after 60 days without repository activity; according to user reports, it emails a warning a few days beforehand. During active development this does not arise. If it happens, open **Actions → Monthly pipeline** and click **Enable workflow**. To prevent it during a quiet period, push any commit. An empty commit should be enough, though GitHub does not document exactly what counts as activity: `git commit --allow-empty -m "Keep scheduled workflow active"` then `git push`.
+
+### Cost
+
+GitHub Actions is free for public repositories on standard runners. A full run takes roughly 15–25 minutes, depending on ISTAT. BigQuery and GCS usage stays within the free tier; integrity-check queries are capped at 1 GB billed each.
+
+---
+
+## Integrity checks
+
+`database/tests/test_integrity.py` checks the BigQuery dataset after each load. It exits with code 1 if any check **FAILs** or **could not run**; **WARN** results are reported but never fail a run. In GitHub Actions it also writes a markdown report to the run's Summary page.
+
+**Dimension tables** (always checked): row counts, required columns not null, surrogate and natural key uniqueness, Italian NUTS0/2/3 coverage in `dim_geography`, and Italian codes that did not come from `nuts_istat.csv` (FAIL: they mean the mapping is incomplete).
+
+**Fact tables** (one block per domain, configured in `FACT_CHECKS`): row count, nulls and `fact_key` uniqueness; grain duplicates (the signature of a double load); orphan foreign keys; plausible value bounds (counts ≥ 0, rates 0–100); rows from each expected provider; Italian NUTS coverage; number of other countries; expected indicators and frequencies; optional columns not entirely empty; and (WARN) whether each expected dataset is present and was extracted within 45 days (`--max-age-days` to change).
+
+**Known accepted gap:** the labour check expects data for at least **105 of 107** provinces, not 107, because two provinces are currently missing. This is deliberate, so that a failed run always signals something new. Restore 107 in `FACT_CHECKS` once the gap is fixed.
+
+**Adding a domain:** add an entry to `FACT_CHECKS`. A domain enabled in `settings.yaml` without an entry produces a WARN.
+
+---
+
+## Debugging failures
+
+1. Read the log: locally the terminal, on GitHub the failed step's log. `ERROR` lines include the full Python traceback.
+2. Check `pipeline_log.json` in GCS `aiccon-data/database/` for a structured JSON summary of the most recent run.
 3. Run the failing stage in isolation: `python run_pipeline.py --stage process --domain social_economy`
-4. Run individual scripts directly for maximum detail: `python -m ingestion.api_sources.social_economy.istat`
-5. For dbt failures: `dbt run --select <model_name>` and check `dbt/logs/dbt.log`
+4. Run individual scripts directly for maximum detail, e.g. `python -m ingestion.api_sources.social_economy.istat` or `python -m database.build_db --domain labour`.
+5. Re-run the integrity checks: `python -m database.tests.test_integrity`
 
 ---
 
@@ -243,11 +323,13 @@ python -m database.tests.test_integrity
 
 | Table | Description |
 |---|---|
-| `dim_geography` | All territories from EU countries to Italian provinces (NUTS0–3) |
+| `dim_geography` | All territories from EU countries to Italian provinces (NUTS0–3, NUTS 2024), plus ISTAT aggregates such as Nord and Mezzogiorno (`nuts_level` NULL). Retired codes are kept with `is_active = FALSE` |
 | `dim_time` | Annual periods 1990–2030 |
 | `dim_source` | Source registry with priority ranking |
 | `dim_legal_form` | Italian legal forms mapped to unified categories and NACE |
 | `dim_indicator` | Indicator catalogue with Italian and English labels |
+
+Dimension rows keep their surrogate keys across runs; fact tables are replaced in full on every load.
 
 ### Fact tables (one per domain)
 
@@ -261,62 +343,27 @@ python -m database.tests.test_integrity
 | `fact_sdg` | 🔲 Stub | `sdg_goal`, `sdg_target` |
 | `fact_housing` | 🔲 Stub | `tenure_type` |
 
-### dbt marts (PowerBI and query app connect to these)
+`fact_labour` mixes annual, quarterly and monthly rows, all attached to the annual `time_key`, and stores totals next to their components. Any aggregation must filter on `frequency` and on the relevant totals; the planned dbt marts will encode this once.
 
-dbt staging models clean and type-cast raw BigQuery tables. Mart models join dimensions to fact tables and apply business logic. Run `dbt docs generate && dbt docs serve` for full interactive documentation.
+### dbt marts (*planned*)
 
-**Social economy marts:**
+PowerBI and the query app will connect to mart models rather than the raw fact tables.
 
-| Model | Description |
-|---|---|
-| `mart_social_economy` | Full flat model — primary PowerBI source for social economy |
-| `mart_se_volunteering_national` | National volunteering rates by year |
-| `mart_se_volunteering_regional` | Regional volunteering rates |
-| `mart_se_associationism_national` | Association membership rates by demographic |
-| `mart_se_employment_eu` | EU employment comparison by NACE |
-| `mart_se_local_units_regional` | Local units by NACE and region |
+**Social economy marts:** `mart_social_economy` (full flat model), `mart_se_volunteering_national`, `mart_se_volunteering_regional`, `mart_se_associationism_national`, `mart_se_employment_eu`, `mart_se_local_units_regional`.
 
-**Labour marts:**
+**Labour marts:** `mart_labour` (full flat model), `mart_labour_rates_italy`, `mart_labour_rates_regional`, `mart_labour_neet`, `mart_labour_employment_by_nace`, `mart_labour_unemployment_by_education`, `mart_labour_employment_edu_citizenship`, `mart_labour_force_monthly`.
 
-| Model | Description |
-|---|---|
-| `mart_labour` | Full flat model — primary PowerBI source for labour |
-| `mart_labour_rates_italy` | Employment, unemployment and inactivity rates for Italy (national, annual) |
-| `mart_labour_rates_regional` | Employment and unemployment rates at NUTS2/NUTS3 for Italy |
-| `mart_labour_neet` | NEET rate by region, age and citizenship |
-| `mart_labour_employment_by_nace` | Employed persons by economic activity across EU |
-| `mart_labour_unemployment_by_education` | Unemployment rate by education level — Italy and EU |
-| `mart_labour_employment_edu_citizenship` | Employment rate by education × citizenship |
-| `mart_labour_force_monthly` | Monthly labour force headcount for Italy |
+When the marts exist, list them under `"views"` in `FACT_CHECKS` so the integrity checks confirm they exist and return rows.
 
 ---
 
-## GenAI monthly summary
+## GenAI monthly summary (*planned*)
 
-After each pipeline run, `genai/summarise.py` queries the BigQuery mart tables for the most recently updated indicators and sends them to Gemini with a structured prompt. The output is a plain-language summary of what changed in the latest data refresh — new data points, notable trends, any source issues flagged during ingestion.
+After each pipeline run, `genai/summarise.py` will query the mart tables for the most recently updated indicators and ask Gemini for a plain-language summary of what changed. The output will be written to GCS (`aiccon-data/summaries/YYYY-MM.md`) and added as a step to the GitHub workflow.
 
-The summary is written to GCS (`aiccon-data/summaries/YYYY-MM.md`) and printed to the GitHub Actions run log.
+## Natural language query interface (*planned*)
 
----
-
-## Natural language query interface
-
-The Streamlit app at `query_app/app.py` allows plain-language querying of the BigQuery database. The flow is:
-
-1. User enters a question in natural language
-2. The BigQuery schema (table names, column names, descriptions from `docs/data_dictionary.md`) is injected into a Gemini prompt
-3. Gemini returns a SQL query
-4. The query is validated (table/column names checked against the schema before execution) and run against BigQuery
-5. Results are displayed as a table, with the generated SQL shown beneath for transparency
-
-Ambiguous queries (references to undefined geographies, unmapped indicator names) are caught at the validation step and returned to the user with a clarifying prompt rather than executed.
-
-Deploy locally:
-```bash
-streamlit run query_app/app.py
-```
-
-Or via Streamlit Community Cloud (free tier) — connect the GitHub repo and set GCP credentials as Streamlit secrets.
+A Streamlit app (`query_app/app.py`) will accept plain-language questions, generate SQL with Gemini using the schema and `docs/data_dictionary.md`, validate table and column names before execution, and show the results with the generated SQL. Ambiguous questions will be returned with a clarifying prompt rather than executed.
 
 ---
 
@@ -324,60 +371,38 @@ Or via Streamlit Community Cloud (free tier) — connect the GitHub repo and set
 
 The social economy and labour domains are the templates. For each new domain:
 
-1. **Create fetcher scripts** in `ingestion/api_sources/{domain}/`
-   following `labour/eurostat.py` and `labour/istat.py`
-
-2. **Create a merge script** at `processing/integrate/merge_{domain}.py`
-   following `merge_labour.py`
-
-3. **Register in four places**:
+1. **Create fetcher scripts** in `ingestion/api_sources/{domain}/`, following `labour/eurostat_labour.py` and `labour/istat_labour.py`.
+2. **Create a merge script** at `processing/integrate/merge_{domain}.py`, following `merge_labour.py`.
+3. **Register it**:
    - `run_pipeline.py` → add loader classes to `DOMAIN_INGESTION_CLASSES`
    - `processing/pipeline.py` → add to `DOMAIN_PROCESSORS`
-   - `dbt/models/` → add staging and mart models
+   - `database/build_db.py` → add a loader with `@domain_loader("{domain}")`
    - `config/settings.yaml` → set `enabled: true`
-
-4. **Fill in the stubs**:
-   - `database/schema/fact_tables.sql` → replace `-- TODO` with actual columns
-   - `database/tests/test_integrity.py` → fill in the stub check function
-
-5. **Update the mappings**:
-   - `processing/mappings/domain_sources.csv` → add source rows
-   - `processing/mappings/nace_labels.csv` → add any new NACE codes if needed
-
-6. **Document**:
-   - `docs/data_dictionary.md` → add fact table field definitions (also used by the NL query app for schema injection)
-   - `docs/source_log.md` → add dataset codes, fetch dates, and known issues
-   - `docs/decisions.md` → log any non-obvious choices
+4. **Fill in the stubs**: replace the `-- TODO` columns in `database/schema/fact_tables.sql`.
+5. **Add integrity checks**: add an entry to `FACT_CHECKS` in `database/tests/test_integrity.py`.
+6. **Update the mappings**: `processing/mappings/domain_sources.csv` (source rows) and `nace_labels.csv` if needed.
+7. **Update the GitHub workflow**: add the domain to the `domain` options in `.github/workflows/pipeline.yml` so it can be run on its own.
+8. **Add any new packages** to `requirements.txt`.
+9. **Document**: `docs/data_dictionary.md`, `docs/source_log.md`, and `docs/decisions.md` for any non-obvious choice.
 
 ---
 
 ## Known limitations
 
-- **NACE O-U at NUTS2**: Eurostat regional employment (`nama_10r_3empers`) only provides the O-U aggregate at NUTS2. Q, P, and S94 are not separable at regional level. Use `lfsa_egan22d` for sector detail (national level only).
+- **NACE O-U at NUTS2**: Eurostat regional employment (`nama_10r_3empers`) only provides the O-U aggregate at NUTS2. Q, P and S94 are not separable at regional level. Use `lfsa_egan22d` for sector detail (national level only).
+- **Labour sub-national scope**: Eurostat LFS regional datasets (`lfst_r_lfu3rt`, `lfst_r_lfur2gan`, `lfst_r_lfe2emprtn`) are fetched for all countries, but non-Italian sub-national rows are dropped when loading. Other countries are represented at NUTS0 only.
+- **NEET series starts 2018**: both ISTAT NEET datasets begin in 2018.
+- **Provincial labour coverage**: 105 of 107 provinces currently have data (see Integrity checks).
+- **ISTAT SDMX availability**: the SDMX service has outages, and requests are paced to respect its 5-per-minute limit. A failed monthly run caused by ISTAT is re-run by hand.
+- **RUNTS, Registro Imprese, Agenzia delle Entrate** are not available through APIs and require manual download and integration.
+- **BigQuery free tier**: the project is designed to stay within BigQuery's free tier (10 GB storage, 1 TB queries per month).
 
-- **Labour sub-national scope**: Eurostat LFS regional datasets (`lfst_r_lfu3rt`, `lfst_r_lfur2gan`, `lfst_r_lfe2emprtn`) are fetched for all countries but non-Italian sub-national rows are dropped in the merge step. All non-Italian countries are represented at NUTS0 (national total) only.
+---
 
-- **NEET series starts 2018**: Both ISTAT NEET datasets begin in 2018. There is no comparable regional NEET series from 2015 like the other RFL datasets.
+## Open items
 
-- **RUNTS, Registro Imprese, Agenzia delle Entrate** are not API-integratable. They require manual downloading and integration.
-
-- **BigQuery free tier**: The project is designed to stay within BigQuery's free tier (10 GB storage, 1 TB queries/month). The NL query interface validates and limits queries before execution to avoid unexpectedly large scans.
-
-
-
-
-
-Run a single domain in isolation: python run_pipeline.py --stage ingest --domain social_economy
-Check GCS to confirm parquet files landed in the right folders
-Check the filenames - see if they include datetime stamps. 
-Run --stage database and check BigQuery tables exist and have rows
-
-Only then run the full pipeline
-
-1. Delete the BigQuery current facts tables for social economy and labour. (It is appending to past versions)
-2. Rerun the --stage process --domain labour. (check for provincial data warnings)
-3. Rerun the --stage database
-
-Identify how to connect PowerBI to BigQuery database.
-Identify how to update integrity_tests.py (or maybe the step is to set up tests within GC, Bigquery or storage? I don't know).
-Then after these things we move towards the CICD with GitActions.
+- Fix the two missing provinces in the labour data, then restore 107 in the integrity check.
+- Investigate `150_873_DF_DCCV_FORZLVMENS1_1` (monthly labour force): its latest successful extraction is months old.
+- Build the dbt staging and mart models, then connect PowerBI to the marts rather than the raw fact tables.
+- Tidy `pyproject.toml` (move Jupyter and other tools to the `dev` group, declare `google-cloud-bigquery`, `google-cloud-storage` and `PyYAML`, drop unused `pandas-gbq`), then install from `uv.lock` in GitHub Actions and retire `requirements.txt`.
+- Gemini monthly summary and Streamlit query app.

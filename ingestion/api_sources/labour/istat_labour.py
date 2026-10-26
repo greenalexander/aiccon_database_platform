@@ -107,6 +107,13 @@ RENAME_MAP = {
 
 # ── CSV fetch & parse ─────────────────────────────────────────────────────────
 
+def _empty_result(dataflow_id: str) -> pd.DataFrame:
+    """An empty DataFrame tagged with its dataflow ID, for failed fetches."""
+    df = pd.DataFrame()
+    df.attrs["dataset_code"] = dataflow_id
+    return df
+
+
 def fetch_istat_csv(
     session,
     dataflow_id: str,
@@ -161,17 +168,17 @@ def fetch_istat_csv(
         response.raise_for_status()
     except Exception as e:
         logger.warning(f"{dataflow_id}: HTTP error — {e}")
-        return pd.DataFrame()
+        return _empty_result(dataflow_id)
 
     if not response.text.strip():
         logger.warning(f"{dataflow_id}: empty response body.")
-        return pd.DataFrame()
+        return _empty_result(dataflow_id)
 
     try:
         df = pd.read_csv(io.StringIO(response.text), low_memory=False)
     except Exception as e:
         logger.warning(f"{dataflow_id}: CSV parse error — {e}")
-        return pd.DataFrame()
+        return _empty_result(dataflow_id)
 
     # Standardise column names: lowercase + apply rename map
     df.columns = [c.strip().lower() for c in df.columns]
@@ -187,6 +194,9 @@ def fetch_istat_csv(
     df = df.drop(columns=drop_cols, errors="ignore")
 
     logger.info(f"{dataflow_id}: {len(df):,} observations loaded.")
+    # Tag every result, empty or not, so BaseLoader.run() can name a dataset
+    # that came back empty. The dataset functions below set the same code.
+    df.attrs["dataset_code"] = dataflow_id
     return df
 
 
@@ -585,7 +595,10 @@ class IstatLabourLoader(BaseLoader):
                     f"  [{idx + 1:02d}/{len(self.DATASETS)}] {label}: FAILED — {exc}. "
                     "Skipping; pipeline continues."
                 )
-                results.append(pd.DataFrame())
+                # Tag with the function name so the error names the dataset.
+                failed = pd.DataFrame()
+                failed.attrs["dataset_code"] = fetch_fn.__name__
+                results.append(failed)
  
         non_empty  = sum(1 for df in results if not df.empty)
         total_rows = sum(len(df) for df in results)
