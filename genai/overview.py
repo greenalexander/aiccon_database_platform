@@ -32,8 +32,7 @@ PROMPT_VERSION = "2026-11-02.2"
 
 # Overridden by the 'genai' section of config/settings.yaml, if present.
 DEFAULTS = {
-    "primary_model": "gemini-3.8-flash",
-    "fallback_model": "gemini-3.6-flash",
+    "models": ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.6-flash-lite"],   # tried in order
     "thinking_level": "low",
     "temperature": 0.3,
     "max_output_tokens": 8192,   # includes thinking tokens
@@ -226,14 +225,15 @@ def write_overview(facts: dict, labels: dict, settings: dict | None = None,
             return result
 
     prompt = build_prompt(vals)
-    for model in dict.fromkeys(m for m in (s["primary_model"], s["fallback_model"]) if m):
+    for model in dict.fromkeys(m for m in s["models"] if m):
         attempt: dict = {"model": model}
         try:
             raw, attempt["usage"] = call_model(client, model, prompt, s)
         except Exception as e:  # noqa: BLE001
-            attempt["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+            code = getattr(e, "code", None)       # HTTP status for API errors
+            attempt["error"] = f"{type(e).__name__}{f' {code}' if code else ''}: {str(e)[:200]}"
             result["attempts"].append(attempt)
-            logger.warning("Gemini %s failed: %s", model, type(e).__name__)
+            logger.warning("Gemini %s failed: %s", model, attempt["error"].split(":")[0])
             continue
         attempt["raw"] = raw
         attempt["problems"] = verify(raw, vals, s["max_chars"])

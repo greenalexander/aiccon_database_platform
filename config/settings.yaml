@@ -163,8 +163,10 @@ pipeline:
 
 # ── GenAI digest ──────────────────────────────────────────────────────────────
 genai:
-  primary_model: "gemini-3.8-flash"
-  fallback_model: "gemini-3.6-flash"
+  models: 
+    - "gemini-3.8-flash"
+    - "gemini-3.6-flash"
+    - "gemini-3.6-flash-lite"
   thinking_level: "low"        # thinking tokens count against max_output_tokens
   temperature: 0.3
   max_output_tokens: 8192

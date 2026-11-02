@@ -51,6 +51,8 @@ jobs:
   pipeline:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      digest_written: ${{ steps.digest.outputs.written }}
 
     # Read by load_config() in base_loader.py, in place of config/.env.
     env:
@@ -103,10 +105,55 @@ jobs:
           python -m database.tests.test_integrity "${args[@]}"
 
       - name: Write monthly digest
+        id: digest
         # Same rule as the integrity checks: run even if earlier steps failed,
         # because stale or missing datasets are what the digest reports.
         if: ${{ !cancelled() && steps.pipeline.outcome != 'skipped' && (github.event_name == 'schedule' || inputs.write_digest) }}
         env:
           # Step-level, so only this step's process can see the key.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python -m genai.summarise
+        run: |
+          python -m genai.summarise --local-copy digest
+          echo "written=true" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the digest for the publishing job
+        if: ${{ !cancelled() && steps.digest.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest
+          path: digest/
+          retention-days: 7;
+
+  publish-digest:
+    # Publishes the digest as a GitHub release. A separate job so that only this
+    # job can write to the repository, and it holds no Google credentials.
+    needs: pipeline
+    if: ${{ !cancelled() && needs.pipeline.outputs.digest_written == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the digest
+        uses: actions/download-artifact@v8
+        with:
+          name: digest
+          path: digest
+
+      - name: Create or update this month's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          file=$(ls digest/digest_*.md)
+          month=$(basename "$file" .md); month=${month#digest_}
+          tag="digest-$month"
+          title=$(head -n 1 "$file" | sed 's/^# //')   # "Aggiornamento dati AICCON: novembre 2026"
+          tail -n +3 "$file" > notes.md                  # the digest without its heading
+          if gh release view "$tag" --repo "$REPO" > /dev/null 2>&1; then
+            gh release edit "$tag" --repo "$REPO" --title "$title" --notes-file notes.md
+            echo "Updated release $tag"
+          else
+            gh release create "$tag" --repo "$REPO" --title "$title" --notes-file notes.md --target "$GITHUB_SHA"
+            echo "Created release $tag"
+          fi

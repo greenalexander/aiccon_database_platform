@@ -4,7 +4,7 @@ This project is under active development. The architecture diagram and stack tab
 
 A contextual statistics platform for social economy research. Collects data from European and Italian public APIs, harmonises it into a unified star-schema database organised by thematic domain (social economy, labour market, welfare, immigration, poverty, SDGs and housing) and serves it through PowerBI dashboards and, later, a natural language query interface.
 
-The pipeline runs automatically on the 1st of each month via GitHub Actions. It writes intermediate artefacts to Google Cloud Storage, loads the final dataset into BigQuery and then runs integrity checks against it. The same workflow can be started by hand from GitHub, for any stage and domain.
+The pipeline runs automatically on the 1st of each month via GitHub Actions. It writes intermediate artefacts to Google Cloud Storage, loads the final dataset into BigQuery, runs integrity checks against it and writes a short digest in Italian of what changed since the previous month. The same workflow can be started by hand from GitHub, for any stage and domain.
 
 ---
 
@@ -19,7 +19,7 @@ The pipeline runs automatically on the 1st of each month via GitHub Actions. It 
 | Orchestration / CI/CD | GitHub Actions | Scheduled monthly run plus manual runs by stage and domain; no infrastructure to manage; free for public repositories |
 | Cloud authentication from CI | Workload Identity Federation | No long-lived service account key stored anywhere (see `docs/decisions.md`) |
 | Transformation layer (*planned*) | dbt (BigQuery adapter) | Declarative SQL models, built-in testing, generated documentation; raw → staging → mart |
-| GenAI summaries (*planned*) | Gemini API | Monthly plain-language digest generated after each refresh |
+| Monthly digest | Gemini API (free tier) | Italian digest of each refresh. Python computes every fact; Gemini writes only the opening paragraph, which is checked, with a template fallback |
 | NL query interface (*planned*) | Streamlit + Gemini | Text-to-SQL over the BigQuery schema |
 | Local development | uv, DuckDB | uv manages the local Python environment; DuckDB for quick local exploration of parquet files |
 
@@ -32,14 +32,15 @@ APIs (Eurostat, ISTAT)
         ↓  ingest
 raw parquet files (GCS: aiccon-data/raw/{domain}/)
         ↓  process
-processed parquet files (GCS: aiccon-data/processed/{domain}/)
+processed parquet files (GCS: aiccon-data/processed/{domain}/, one file per month)
         ↓  database (build_db.py; dbt planned)
 BigQuery dataset (aiccon_data)
         ↓  integrity checks (test_integrity.py)
-        ↓                    ↓
-PowerBI dashboards     Streamlit NL query app (planned)
-                             ↓
-                    Gemini monthly summary (planned)
+        ↓  monthly digest (genai/summarise.py: compares this month's processed files
+        ↓                  with the previous month's; Gemini writes the opening paragraph)
+        ↓                    ↓                              ↓
+PowerBI dashboards     Streamlit NL query app (planned)     digest (GCS: aiccon-data/summaries/,
+                                                            and the Actions run Summary page)
 ```
 
 GitHub Actions runs ingest → process → database → integrity checks on the 1st of each month. Any stage and domain can also be run by hand from the Actions tab (see [Automated runs (GitHub Actions)](#automated-runs-github-actions)).
@@ -130,7 +131,15 @@ aiccon_database_platform/
 │       └── test_integrity.py        post-load integrity checks (see "Integrity checks")
 │
 ├── dbt/                             (planned) staging and mart models
-├── genai/                           (planned) Gemini monthly summary
+├── genai/                           monthly digest (see "Monthly digest")
+│   ├── facts.py                     what changed since last month, from processed-file metadata
+│   ├── overview.py                  opening paragraph with Gemini: placeholders, checks, fallback
+│   ├── render.py                    deterministic Italian markdown
+│   ├── summarise.py                 entry point: facts → paragraph → markdown → GCS
+│   └── dataset_labels.csv           Italian dataset labels used in the digest
+├── tests/
+│   └── test_overview.py             unit tests for the paragraph checks (no network)
+├── scratch/                         local trial outputs (gitignored)
 ├── query_app/                       (planned) Streamlit NL query interface
 │
 ├── .github/
@@ -231,7 +240,7 @@ The workflow is defined in `.github/workflows/pipeline.yml`.
 ### When it runs
 
 - **Scheduled:** at 06:17 UTC on the 1st of every month (07:17 Italian time in winter, 08:17 in summer). Cron schedules in GitHub Actions are in UTC. GitHub may start scheduled runs late at busy times, which is why the minute is not :00.
-- **Manually:** on GitHub, go to **Actions → Monthly pipeline → Run workflow**, choose a stage (`all`, `ingest`, `process`, `database`) and a domain (`all`, `social_economy`, `labour`), and tick or untick the integrity checks. `--stage database` is a quick test: it takes about two minutes and makes no API calls.
+- **Manually:** on GitHub, go to **Actions → Monthly pipeline → Run workflow**, choose a stage (`all`, `ingest`, `process`, `database`) and a domain (`all`, `social_economy`, `labour`), tick or untick the integrity checks, and choose whether to write this month's digest (off by default, because it overwrites the existing one). `--stage database` is a quick test: it takes about two minutes and makes no API calls.
 
 Only one run can be active at a time; a run started while another is in progress waits for it.
 
@@ -242,8 +251,9 @@ Only one run can be active at a time; a run started while another is in progress
 3. Installs Python 3.12 and `requirements.txt`.
 4. Runs `python run_pipeline.py` with the chosen stage and domain.
 5. Runs the integrity checks. They run **even if the pipeline failed**, but not if the run was cancelled or never reached the pipeline step.
+6. Writes the monthly digest (see [Monthly digest](#monthly-digest-gemini)), under the same condition as the integrity checks. Scheduled runs always write it; manual runs only when **write_digest** is ticked.
 
-The run is marked as failed if either the pipeline or the integrity checks fail. The integrity report appears on the run's **Summary** page.
+The run is marked as failed if the pipeline, the integrity checks or the digest step fails. The digest step fails only if it cannot read the processed files or write to GCS; Gemini problems never fail it. The integrity report and the digest appear on the run's **Summary** page.
 
 ### Authentication: Workload Identity Federation
 
@@ -260,9 +270,9 @@ No service account key is stored in GitHub. On each run, GitHub issues a short-l
 
 **If the repository is renamed or moved** (for example to an AICCON organisation account), authentication will stop working until both the attribute condition and the `workloadIdentityUser` binding are updated to the new `owner/repo` name.
 
-### Configuration: repository variables
+### Configuration: repository variables and one secret
 
-The workflow reads five **repository variables** (Settings → Secrets and variables → Actions → Variables). None of them is a credential, so no **secrets** are used.
+The workflow reads five **repository variables** (Settings → Secrets and variables → Actions → Variables). None of them is a credential.
 
 | Variable | Value |
 |---|---|
@@ -271,6 +281,8 @@ The workflow reads five **repository variables** (Settings → Secrets and varia
 | `GCS_BUCKET` | `data-aiccon-database-platform` |
 | `BQ_PROJECT` | `aiccon-database-platform` |
 | `BQ_DATASET` | `aiccon_data` |
+
+It also reads one **secret** (Settings → Secrets and variables → Actions → Secrets): `GEMINI_API_KEY`, the Gemini API key for the monthly digest. It is passed only to the digest step, and GitHub masks it as `***` in logs.
 
 ### Notifications
 
@@ -289,7 +301,7 @@ In public repositories, GitHub disables scheduled workflows after 60 days withou
 
 ### Cost
 
-GitHub Actions is free for public repositories on standard runners. A full run takes roughly 15–25 minutes, depending on ISTAT. BigQuery and GCS usage stays within the free tier; integrity-check queries are capped at 1 GB billed each.
+GitHub Actions is free for public repositories on standard runners. A full run takes roughly 15–25 minutes, depending on ISTAT. BigQuery and GCS usage stays within the free tier; integrity-check queries are capped at 1 GB billed each. Gemini calls use the free tier of a separate project with no billing account, so they cannot be charged.
 
 ---
 
@@ -357,9 +369,42 @@ When the marts exist, list them under `"views"` in `FACT_CHECKS` so the integrit
 
 ---
 
-## GenAI monthly summary (*planned*)
+## Monthly digest (Gemini)
 
-After each pipeline run, `genai/summarise.py` will query the mart tables for the most recently updated indicators and ask Gemini for a plain-language summary of what changed. The output will be written to GCS (`aiccon-data/summaries/YYYY-MM.md`) and added as a step to the GitHub workflow.
+After each scheduled run, `genai/summarise.py` writes a short digest in Italian for colleagues: which datasets were refreshed, which gained new periods, which were not updated and which are missing. It describes the release, not the statistics: it reports no values.
+
+### How it works
+
+1. `facts.py` compares this month's processed parquet with the most recent earlier one, per domain, using metadata only (dataset codes, period labels, row counts, extraction times). A dataset is *updated* if its extraction time advanced; *not updated* if it did not, which means processing fell back to an older raw file, typically after an ISTAT outage; *missing* if it is configured in the domain's merge module but absent; and *new* if it was not in the previous file. A month with no earlier file is a *baseline*.
+2. `overview.py` asks Gemini for the opening paragraph only. Gemini sees each fact as a placeholder, such as `{n_aggiornati}`, together with its value, and must write the placeholder. The paragraph is rejected if it contains a digit, a number word, a month name, a quantifier, a trend word, formatting, or an unknown or missing placeholder. Python then substitutes the values, so every number in the digest comes from Python.
+3. Models are tried in the order listed under `genai.models` in `config/settings.yaml`. If none returns an acceptable paragraph, a deterministic template paragraph is used. Gemini can never make the run fail.
+4. `render.py` builds the rest of the digest deterministically: new periods, items to check, and a table of the other datasets.
+5. `summarise.py` writes `summaries/YYYY-MM.json` to GCS (the audit record: facts, every Gemini attempt including rejected text, settings and prompt version), then `summaries/YYYY-MM.md`. On GitHub it also appends the digest to the run's Summary page.
+
+The checks guarantee that numbers, months and dataset names are correct. They cannot guarantee nuance: a paragraph can follow every rule and still word a fact loosely, which is why the prompt is versioned and every accepted paragraph is kept in the audit record.
+
+### Outputs and visibility
+
+The Actions log shows statuses, model names, HTTP status codes and token counts, never prompts or Gemini output. The digest itself appears on the run's Summary page, which is public because the repository is public; it contains only dataset names, periods and counts. 
+Each digest is also published as a GitHub release (tag digest-YYYY-MM) by a separate job that has write access to the repository but no Google credentials; colleagues read it on the repository’s Releases page.
+
+### Gemini setup
+
+The API key belongs to a separate Google Cloud project, `aiccon-digest`, which has no billing account, so every call uses the Gemini API free tier and none can be billed. **Do not create Gemini keys in `aiccon-database-platform`**: billing is enabled there, so its calls would be charged. The key is an AI Studio authorisation key, restricted to the Gemini API, stored as the GitHub secret `GEMINI_API_KEY` and, for local runs, in `config/.env`. Free-tier limits apply per project and model and are shown on AI Studio's rate limit page. The reasons for these choices are in `docs/decisions.md`.
+
+### Running it
+
+```bash
+python -m genai.summarise --month 2026-11 --no-upload            # writes scratch/digest_2026-11.md and .json
+python -m genai.summarise --month 2026-11 --no-upload --no-llm   # template paragraph, no Gemini call
+python -m genai.summarise                                        # current month, writes to GCS
+python -m genai.overview --facts scratch/facts.json --dry-run     # show the prompt without calling Gemini
+python -m pytest tests/test_overview.py                          # unit tests, no network
+```
+
+Running the digest for a month overwrites that month's files. A run makes at most one Gemini request per model and retry: nine with the current settings.
+
+Dataset labels live in `genai/dataset_labels.csv`; a dataset without a label appears under its code.
 
 ## Natural language query interface (*planned*)
 
@@ -382,8 +427,9 @@ The social economy and labour domains are the templates. For each new domain:
 5. **Add integrity checks**: add an entry to `FACT_CHECKS` in `database/tests/test_integrity.py`.
 6. **Update the mappings**: `processing/mappings/domain_sources.csv` (source rows) and `nace_labels.csv` if needed.
 7. **Update the GitHub workflow**: add the domain to the `domain` options in `.github/workflows/pipeline.yml` so it can be run on its own.
-8. **Add any new packages** to `requirements.txt`.
-9. **Document**: `docs/data_dictionary.md`, `docs/source_log.md`, and `docs/decisions.md` for any non-obvious choice.
+8. **Update the digest**: add the domain to `DOMAIN_MODULES` in `genai/facts.py` and to `DOMINI` in `genai/render.py`, and add its datasets to `genai/dataset_labels.csv`.
+9. **Add any new packages** to `requirements.txt`.
+10. **Document**: `docs/data_dictionary.md`, `docs/source_log.md`, and `docs/decisions.md` for any non-obvious choice.
 
 ---
 
@@ -395,6 +441,8 @@ The social economy and labour domains are the templates. For each new domain:
 - **Provincial labour coverage**: 105 of 107 provinces currently have data (see Integrity checks).
 - **ISTAT SDMX availability**: the SDMX service has outages, and requests are paced to respect its 5-per-minute limit. A failed monthly run caused by ISTAT is re-run by hand.
 - **RUNTS, Registro Imprese, Agenzia delle Entrate** are not available through APIs and require manual download and integration.
+- **Multi-indicator ISTAT dataflows**: several ISTAT social-economy dataflows (`VOLON1_*`, `VOLON_ORG1_*`, `AVQ_PERSONE_*`) contain more than one indicator, distinguished by a `data_type` (and sometimes `measure`) dimension that processing does not keep; `FORZLVMENS1_1` contains several published editions of each observation; and the social-economy copy of `lfsa_egan22d` drops sex and age. Priority resolution then keeps one arbitrary row per observation, and `VOLON1_4` and `VOLON1_5` are dropped entirely. These series should not be used for analysis until the merge is fixed. The integrity checks cannot detect this, because de-duplication makes the output unique by construction.
+- **Gemini availability on the free tier**: in testing (November 2026) the models often returned HTTP 503 ("high demand"). The digest then tries the next model, and finally uses the template paragraph.
 - **BigQuery free tier**: the project is designed to stay within BigQuery's free tier (10 GB storage, 1 TB queries per month).
 
 ---
@@ -402,7 +450,7 @@ The social economy and labour domains are the templates. For each new domain:
 ## Open items
 
 - Fix the two missing provinces in the labour data, then restore 107 in the integrity check.
-- Investigate `150_873_DF_DCCV_FORZLVMENS1_1` (monthly labour force): its latest successful extraction is months old.
+- Fix the merge of multi-indicator ISTAT dataflows (see Known limitations).
 - Build the dbt staging and mart models, then connect PowerBI to the marts rather than the raw fact tables.
 - Tidy `pyproject.toml` (move Jupyter and other tools to the `dev` group, declare `google-cloud-bigquery`, `google-cloud-storage` and `PyYAML`, drop unused `pandas-gbq`), then install from `uv.lock` in GitHub Actions and retire `requirements.txt`.
-- Gemini monthly summary and Streamlit query app.
+- Streamlit query app. Before building it, check the Gemini API terms on apps used by people in the EEA (see `docs/decisions.md`).

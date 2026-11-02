@@ -17,6 +17,7 @@ because GitHub Actions logs are public for this repository.
 Run from the repository root:
     python -m genai.summarise --month 2026-11 --no-upload    # writes to scratch/
     python -m genai.summarise --month 2026-11                # writes to GCS
+    python -m genai.summarise --local-copy digest            # GCS, plus digest/digest_YYYY-MM.md
 """
 from __future__ import annotations
 
@@ -50,6 +51,9 @@ def main() -> int:
     parser.add_argument("--no-upload", action="store_true",
                         help="Write to --out-dir instead of GCS.")
     parser.add_argument("--out-dir", default="scratch", help="Used with --no-upload.")
+    parser.add_argument("--local-copy", default=None, metavar="DIR",
+                        help="Also write digest_YYYY-MM.md to DIR (used by the workflow "
+                             "to publish the digest as a GitHub release).")
     parser.add_argument("--no-llm", action="store_true",
                         help="Skip Gemini and use the template paragraph.")
     args = parser.parse_args()
@@ -109,6 +113,10 @@ def main() -> int:
             for name, text, ctype in ((f"{args.month}.json", audit, "application/json"),
                                       (f"{args.month}.md", digest, "text/markdown; charset=utf-8")):
                 logger.info("Written %s", upload(config, name, text, ctype))
+        if args.local_copy:
+            copy_dir = Path(args.local_copy)
+            copy_dir.mkdir(parents=True, exist_ok=True)
+            (copy_dir / f"digest_{args.month}.md").write_text(digest, encoding="utf-8")
     except Exception:  # noqa: BLE001
         logger.exception("Could not write the digest")
         return 1

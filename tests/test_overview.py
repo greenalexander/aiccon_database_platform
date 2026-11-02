@@ -75,7 +75,7 @@ GOOD_FOR_FACTS = ("L'aggiornamento di {mese}, rispetto a {mese_precedente}, rigu
 def test_fallback_model_used_when_primary_fails(monkeypatch):
     monkeypatch.setattr(ov, "call_model", _stub([RuntimeError("503"), GOOD_FOR_FACTS]))
     r = ov.write_overview(FACTS, LABELS, client=object())
-    assert r["source"] == "gemini" and r["model"] == ov.DEFAULTS["fallback_model"]
+    assert r["source"] == "gemini" and r["model"] == ov.DEFAULTS["models"][1]
     assert "Forze di lavoro" in r["text"]
 
 

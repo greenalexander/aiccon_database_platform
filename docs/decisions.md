@@ -6,6 +6,66 @@ Entry added whenever a non-obvious choice is made about data scope, source prior
 
 ---
 
+## 2026-11-02: Monthly digest with Gemini
+
+The following decisions were taken together when the monthly digest (`genai/`) was built.
+
+### A release digest from metadata, not a summary of values
+
+**Context.** The README planned a summary of changes in the indicators, read from the dbt marts. The marts do not exist yet; fact tables are replaced in full on every load, so BigQuery holds no history; and `fact_labour` mixes frequencies and totals on one time key.
+
+**Decision.** The digest reports which datasets were refreshed, which gained new periods, which were not updated and which are missing. It reports no statistical values and no revisions of values.
+
+**Why.** These facts can be computed reliably from metadata now, without the marts. Comparing values would be unreliable for some datasets until the merge issue below is fixed, because a "revision" could simply be a different arbitrary row surviving de-duplication. A summary of values can follow once the marts and the merge fix exist.
+
+### Previous state from the dated processed files in GCS
+
+**Decision.** For each domain, the digest compares this month's processed parquet with the most recent earlier one, reading only metadata columns. Expected datasets come from the `*_DATASET_META` dicts in the merge modules, and frequency is inferred from the format of the period label.
+
+**Why.** Processed files are dated and accumulate, so the previous state already exists, at no BigQuery cost. Taking expected datasets from configuration means a dataset missing every month is still reported. A dataset whose extraction time did not advance was served from an older raw file, which is the signature of an ISTAT outage.
+
+**Consequences.** A diff of processed files cannot separate a source revision from a pipeline change. Row-count changes are reported with that caveat, and the commit SHA is recorded in the audit file.
+
+### Gemini Developer API free tier, with a key in a billing-free project
+
+**Context.** There is no budget. The options considered were the Gemini Developer API free tier with an API key; Gemini on Agent Platform (formerly Vertex AI) through the existing Workload Identity Federation service account; and the Claude API.
+
+**Decision.** The Gemini Developer API free tier, with an AI Studio key from a separate project, `aiccon-digest`, that has no billing account. The key is stored as the GitHub secret `GEMINI_API_KEY`.
+
+**Why.** The free tier applies only to projects without an active billing account, and billing is enabled on `aiccon-database-platform`, so a key there would be billed. Agent Platform has no standing free tier (its express mode is only for new Google Cloud users) and would bill the main project, however little. The Claude API was not used because the monthly API credits included with a Team plan must be claimed by a Team Owner.
+
+**Consequences.** This is a deliberate exception to the 2026-10-26 decision to store no long-lived credentials: the key can only consume free quota in an empty project, and AI Studio authorisation keys are restricted to the Gemini API by default. Under the Gemini API terms, users in the EEA receive the paid-tier data terms on unpaid quota too, so prompts are not used to improve Google's products. The same terms allow only paid services when "making API Clients available to users" in the EEA. A scheduled job whose output colleagues read was judged not to be such a client. The planned Streamlit app, which sends colleagues' questions to Gemini, probably is, so check this before building it. These are readings of the terms, not legal advice.
+
+### Gemini writes one paragraph, through placeholders, and is checked
+
+**Decision.** Python computes every fact and renders all lists and tables. Gemini writes only the opening paragraph, refers to facts through placeholders such as `{n_aggiornati}`, and sees values only to choose grammatical agreement. A checker rejects the paragraph if it contains digits, Italian number words, month names, quantifiers, trend words, formatting, or unknown or missing placeholders. Python then substitutes the values. If no model produces an acceptable paragraph, a deterministic template paragraph is used.
+
+**Why.** A check that every number in the output appears in the input would miss a correct number attached to the wrong fact, numbers written as words, and invented qualitative claims. With placeholders, correct numbers are guaranteed by construction, and requiring every placeholder stops Gemini expressing a fact in words instead. The residual risk is wording that drifts in meaning without breaking a rule: an early version described missing datasets as "non pervenuti", which implies a cause. The prompt is therefore versioned, and every attempt is kept in the audit file.
+
+### Models, thinking and retries in configuration
+
+**Decision.** Models are tried in the order listed under `genai.models` in `config/settings.yaml` (currently `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`), with thinking level `low`, `max_output_tokens` 8192, and at most three tries per model, retrying only HTTP 408, 429 and 5xx.
+
+**Why.** In testing the models often returned HTTP 503 ("high demand"), so a chain of models improves the chance of a Gemini paragraph. Thinking tokens count against `max_output_tokens`: `gemini-3.6-flash` used up to 2,164 thinking tokens for a paragraph of about 100 tokens, even at `low`, so the earlier limit of 2,048 would have truncated it. The SDK retries by default; setting the policy explicitly bounds a run to nine requests, within the free daily limits (20 requests per day for `gemini-3.8-flash` when this was set up).
+
+### The digest step runs even when the pipeline fails, and keeps prose out of the log
+
+**Decision.** The digest step uses the same condition as the integrity checks. Scheduled runs always write the digest; manual runs only when `write_digest` is ticked. The key is passed in the step's `env`, not the job's. The log carries statuses, model names, HTTP status codes and token counts, never prompts or Gemini output. The audit JSON is written before the markdown, and the digest is also appended to the run's Summary page.
+
+**Why.** Stale and missing datasets are the most useful content when a run partly fails. Manual test runs should not overwrite the month's digest by accident. The repository is public, so its logs and Summary pages are public: a step-level secret limits exposure, and the digest contains only dataset names, periods and counts.
+
+**Consequences.** Delivery: the digest is published as a GitHub release, and colleagues are given the link to the Releases page. Email or Teams delivery could later be added with a Power Automate flow watching the releases feed, without sharing credentials
+
+### Merge issue found and deferred
+
+**Context.** Diagnosing the observation key for the digest showed that several ISTAT social-economy dataflows contain more than one indicator, distinguished by a `data_type` (and sometimes `measure`) dimension that processing drops; that `FORZLVMENS1_1` contains several published editions of each observation; and that the social-economy copy of `lfsa_egan22d` drops sex and age. Priority resolution then keeps one arbitrary row per observation, and `VOLON1_4` and `VOLON1_5` disappear entirely.
+
+**Decision.** Deferred, so that this iteration stays focused on the digest. The issue is documented under Known limitations in the README.
+
+**Consequences.** The affected series should not be used for analysis. The fix would map each ISTAT `data_type` (and `measure`) to its own indicator, keep only the latest edition, map sex and age in the social-economy Eurostat processing, and de-duplicate on every dimension, with a check that fails the processing stage if two rows share every dimension.
+
+---
+
 ## 2026-10-26: Automation with GitHub Actions
 
 The following decisions were taken together when the pipeline was moved from manual runs on a laptop to GitHub Actions.
@@ -37,6 +97,8 @@ The following decisions were taken together when the pipeline was moved from man
 **Decision.** The workflow reads `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCS_BUCKET`, `BQ_PROJECT` and `BQ_DATASET` from GitHub repository variables. No secrets are used.
 
 **Why.** None of these values is a credential; with federation, proof of identity is the per-run token. Secrets are masked in logs, which only makes typos harder to diagnose. Variables are kept in GitHub rather than in the workflow file so that future workflows (dbt, Gemini) can share them.
+
+**Update (2026-11-02).** The first secret, `GEMINI_API_KEY`, was added for the monthly digest (see that entry).
 
 ### `requirements.txt` for CI, `uv.lock` later
 
@@ -101,12 +163,14 @@ The following decisions were taken together when the pipeline was moved from man
 **Decision**: Use the OneDrive/SharePoint sync client (local mapped drive) rather than the Office 365 REST API or Microsoft Graph API.
 **Rationale**: Simpler implementation — no OAuth flow, no library dependencies beyond the standard library. Since the pipeline runs locally on one machine, the sync client is always available. If the project moves to cloud execution (e.g. GitHub Actions with Azure) this would need to be revisited.
 **Revisit when**: automation moves off a local machine.
+**Superseded.** The pipeline now runs on GitHub Actions and keeps its data in GCS and BigQuery (see README). Kept for history.
 
 ### Decision: DuckDB as the integration layer
 **Date**: 2026-05
 **Decision**: Use DuckDB to build the star schema from parquet files, rather than loading data directly into PowerBI or using a cloud database.
 **Rationale**: DuckDB can query parquet files directly, is embedded (no server to maintain), and produces a single `.duckdb` file that PowerBI can connect to via ODBC. Colleagues need no database knowledge. The file lives on SharePoint and refreshes monthly.
 **Revisit when**: data volume grows beyond ~10GB or concurrent access becomes a requirement (DuckDB does not support multiple simultaneous writers).
+**Superseded.** BigQuery is now the analytical database; DuckDB remains only for local exploration of parquet files (see README). Kept for history.
 
 ### Decision: long-format (tidy) fact tables
 **Date**: 2026-05
@@ -122,6 +186,7 @@ The following decisions were taken together when the pipeline was moved from man
 **Date**: 2026-05
 **Decision**: The processed layer stores one file per domain named `{domain}_{YYYY_MM}.parquet`. The raw layer accumulates monthly snapshots; the processed layer keeps only the current file (overwritten each run).
 **Rationale**: Raw snapshots are valuable for auditing source data changes over time. Processed files are deterministic outputs — they can always be regenerated from the raw files, so accumulating them wastes space.
+**Correction (2026-11-02).** The code names processed files by run month (`{domain}_YYYY-MM.parquet`) and never deletes them, so they accumulate: one file per domain for each month in which processing ran. The monthly digest relies on this to compare each month with the previous one, so do not add a clean-up of old processed files without changing the digest.
 
 ---
 
