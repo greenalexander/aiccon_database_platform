@@ -1,0 +1,29 @@
+dataset_code,fonte,label_it
+150_873_DF_DCCV_FORZLVMENS1_1,ISTAT,"Forze di lavoro, dati mensili (Italia)"
+150_915_DF_DCCV_TAXOCCU1_5,ISTAT,Tasso di occupazione (fino alle province)
+151_914_DF_DCCV_TAXDISOCCU1_5,ISTAT,Tasso di disoccupazione (fino alle regioni)
+151_914_DF_DCCV_TAXDISOCCU1_6,ISTAT,Tasso di disoccupazione (fino alle regioni)
+151_914_DF_DCCV_TAXDISOCCU1_8,ISTAT,Tasso di disoccupazione (fino alle province)
+152_913_DF_DCCV_TAXINATT1_5,ISTAT,Tasso di inattività (fino alle province)
+172_931_DF_DCCV_NEET1_11,ISTAT,Quota NEET (fino alle regioni)
+172_931_DF_DCCV_NEET1_9,ISTAT,Quota NEET per cittadinanza (ripartizioni)
+lfsa_egan22d,Eurostat,"Occupati per attività economica NACE, livello nazionale"
+lfst_r_lfe2emprtn,Eurostat,"Tasso di occupazione per istruzione e cittadinanza, NUTS 2"
+lfst_r_lfu3rt,Eurostat,"Tasso di disoccupazione per livello di istruzione, NUTS 2"
+lfst_r_lfur2gan,Eurostat,"Tasso di disoccupazione per cittadinanza, NUTS 2"
+85_84_DF_DCSA_VOLON1_1,ISTAT,Tasso di volontariato
+85_84_DF_DCSA_VOLON1_2,ISTAT,Volontariato per tipo di attività
+85_84_DF_DCSA_VOLON1_3,ISTAT,Volontariato per anni di attività
+85_84_DF_DCSA_VOLON1_4,ISTAT,Tasso di volontariato
+85_84_DF_DCSA_VOLON1_5,ISTAT,Tasso di volontariato
+85_84_DF_DCSA_VOLON1_6,ISTAT,Tasso di volontariato (regioni)
+85_171_DF_DCSA_VOLON_ORG1_1,ISTAT,Volontariato organizzato per settore
+85_171_DF_DCSA_VOLON_ORG1_2,ISTAT,Volontariato organizzato per tipo di organizzazione
+85_171_DF_DCSA_VOLON_ORG1_3,ISTAT,Volontariato organizzato per motivazione
+85_171_DF_DCSA_VOLON_ORG1_4,ISTAT,Volontariato organizzato per impatto personale
+83_63_DF_DCCV_AVQ_PERSONE_129,ISTAT,Partecipazione ad associazioni
+83_63_DF_DCCV_AVQ_PERSONE_130,ISTAT,Partecipazione ad associazioni
+83_63_DF_DCCV_AVQ_PERSONE_131,ISTAT,Partecipazione ad associazioni per condizione professionale
+83_63_DF_DCCV_AVQ_PERSONE_132,ISTAT,Partecipazione ad associazioni (regioni)
+nama_10r_3empers,Eurostat,"Occupati per attività economica, NUTS 2"
+sbs_r_nuts2021,Eurostat,"Unità locali per attività economica, NUTS 2"

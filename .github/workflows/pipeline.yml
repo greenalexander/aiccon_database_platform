@@ -29,6 +29,10 @@ on:
         description: "Run the integrity checks afterwards"
         type: boolean
         default: true
+      write_digest:
+        description: "Write this month's digest (overwrites it if it exists)"
+        type: boolean
+        default: false
 
 # What the job's automatic GitHub token may do. id-token: write lets the job
 # ask GitHub for the signed identity token that Workload Identity Federation
@@ -97,3 +101,12 @@ jobs:
           args=()
           if [ "$DOMAIN" != "all" ]; then args+=(--domain "$DOMAIN"); fi
           python -m database.tests.test_integrity "${args[@]}"
+
+      - name: Write monthly digest
+        # Same rule as the integrity checks: run even if earlier steps failed,
+        # because stale or missing datasets are what the digest reports.
+        if: ${{ !cancelled() && steps.pipeline.outcome != 'skipped' && (github.event_name == 'schedule' || inputs.write_digest) }}
+        env:
+          # Step-level, so only this step's process can see the key.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python -m genai.summarise

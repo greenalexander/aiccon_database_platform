@@ -15,6 +15,7 @@ dependencies = [
     "pyarrow>=15.0.0",
     "gcsfs>=2026.5.0",
     "pandas-gbq>=0.35.0",
+    "google-genai>=2.34.0",
 ]
 
 [tool.uv]
@@ -27,6 +28,7 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "hatchling>=1.29.0",
+    "pytest>=9.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]

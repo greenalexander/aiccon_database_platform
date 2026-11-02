@@ -160,3 +160,13 @@ pipeline:
   max_years_back: null
   # Log level: DEBUG, INFO, WARNING, ERROR
   log_level: "INFO"
+
+# ── GenAI digest ──────────────────────────────────────────────────────────────
+genai:
+  primary_model: "gemini-3.8-flash"
+  fallback_model: "gemini-3.6-flash"
+  thinking_level: "low"        # thinking tokens count against max_output_tokens
+  temperature: 0.3
+  max_output_tokens: 8192
+  retry_attempts: 3            # per model, first try included
+  max_chars: 700

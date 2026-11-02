@@ -3,7 +3,7 @@
 *.env
 *.json
 service-account*.json
-
+scratch/
  
 # ── Manual source data (raw downloads — never commit) ────────────────────────
 ingestion/manual_sources/**/*
