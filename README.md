@@ -157,7 +157,6 @@ aiccon_database_platform/
 │   └── maintenance.md               how to add new domains
 │
 ├── run_pipeline.py                  entry point: ingest → process → database
-├── requirements.txt                 runtime dependencies, pinned (used by GitHub Actions)
 ├── pyproject.toml, uv.lock          local environment managed by uv
 ├── .gitignore
 └── README.md
@@ -176,9 +175,9 @@ uv sync
 copy config\.env.example config\.env
 ```
 
-`uv sync` creates `.venv` from `uv.lock`. Alternatively, `pip install -r requirements.txt` in any Python 3.12 environment installs exactly what the pipeline needs (this is what GitHub Actions does).
+`uv sync` creates .venv from uv.lock, including the dev group (Jupyter, DuckDB, pytest). GitHub Actions installs the same lock without the dev group `uv sync` creates `.venv` from `uv.lock`. Alternatively, `pip install -r requirements.txt` in any Python 3.12 environment installs exactly what the pipeline needs (this is what GitHub Actions does).
 
-**Dependencies.** `requirements.txt` lists only the packages the code imports at runtime, pinned to tested versions. When you add a package the pipeline imports (`uv add ...`), add it to `requirements.txt` as well, or the GitHub run will fail with `ModuleNotFoundError`. Tidying `pyproject.toml` so that GitHub Actions can install from `uv.lock` instead is an open item.
+**Dependencies.** Add packages the pipeline imports with uv add <package>, and local-only tools with uv add --group dev <package>. Both update uv.lock, which must be committed. GitHub Actions installs with uv sync --locked, which fails if uv.lock is out of date with pyproject.toml
 
 **Environment variables.** Edit `config/.env` and set:
 
@@ -248,7 +247,7 @@ Only one run can be active at a time; a run started while another is in progress
 
 1. Checks out the repository on a fresh Ubuntu 24.04 machine (a GitHub-hosted *runner*).
 2. Authenticates to Google Cloud with Workload Identity Federation.
-3. Installs Python 3.12 and `requirements.txt`.
+3. Installs uv and Python 3.12, then the locked runtime dependencies (uv sync --locked --no-dev)
 4. Runs `python run_pipeline.py` with the chosen stage and domain.
 5. Runs the integrity checks. They run **even if the pipeline failed**, but not if the run was cancelled or never reached the pipeline step.
 6. Writes the monthly digest (see [Monthly digest](#monthly-digest-gemini)), under the same condition as the integrity checks. Scheduled runs always write it; manual runs only when **write_digest** is ticked.
@@ -428,7 +427,7 @@ The social economy and labour domains are the templates. For each new domain:
 6. **Update the mappings**: `processing/mappings/domain_sources.csv` (source rows) and `nace_labels.csv` if needed.
 7. **Update the GitHub workflow**: add the domain to the `domain` options in `.github/workflows/pipeline.yml` so it can be run on its own.
 8. **Update the digest**: add the domain to `DOMAIN_MODULES` in `genai/facts.py` and to `DOMINI` in `genai/render.py`, and add its datasets to `genai/dataset_labels.csv`.
-9. **Add any new packages** to `requirements.txt`.
+9. **Add any new packages** with `uv add`, and commit `uv.lock`.
 10. **Document**: `docs/data_dictionary.md`, `docs/source_log.md`, and `docs/decisions.md` for any non-obvious choice.
 
 ---
@@ -448,9 +447,4 @@ The social economy and labour domains are the templates. For each new domain:
 ---
 
 ## Open items
-
-- Fix the two missing provinces in the labour data, then restore 107 in the integrity check.
-- Fix the merge of multi-indicator ISTAT dataflows (see Known limitations).
-- Build the dbt staging and mart models, then connect PowerBI to the marts rather than the raw fact tables.
-- Tidy `pyproject.toml` (move Jupyter and other tools to the `dev` group, declare `google-cloud-bigquery`, `google-cloud-storage` and `PyYAML`, drop unused `pandas-gbq`), then install from `uv.lock` in GitHub Actions and retire `requirements.txt`.
 - Streamlit query app. Before building it, check the Gemini API terms on apps used by people in the EEA (see `docs/decisions.md`).
