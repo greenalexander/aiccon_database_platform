@@ -84,7 +84,7 @@ jobs:
         # pyproject.toml; --no-dev skips local tools (Jupyter, DuckDB, pytest).
         # Adding .venv/bin to GITHUB_PATH makes `python` in every later step
         # the project's interpreter, so those steps need no changes.
-        run: 
+        run: |
           uv sync --locked --no-dev
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
