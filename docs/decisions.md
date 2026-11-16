@@ -4,7 +4,107 @@ Record of significant data and architectural decisions made during the build of 
 
 Entry added whenever a non-obvious choice is made about data scope, source priority, mapping logic, or architecture. 
 
----
+## 2026-11-16: dbt refactor (roadmap step 4)
+
+The following decisions were taken together before building the dbt project that replaces the transformation logic in `database/build_db.py`. The findings that shaped them come first, because several of them changed the plan.
+
+### What we found before deciding
+
+**`views.sql` was never run.** `build_db.py` executes only `dimensions.sql` and `fact_tables.sql`, and `views.sql` uses unqualified table names that BigQuery rejects without a default dataset. `aiccon_data` contains no views: PowerBI reads the tables. The file also contains a bug (`gender IN ('total', NULL)` never matches a NULL). The six stub fact tables (`fact_civil_society`, `fact_housing`, `fact_immigration`, `fact_poverty`, `fact_sdg`, `fact_welfare`) have been empty since they were created on 1 June.
+
+**Geography.** `nuts_istat.csv` is a crosswalk from ISTAT codes to NUTS codes (167 rows, 137 distinct NUTS codes), not a list of territories. ITC2 had two Italian names; "Valle d'Aosta/Vallée d'Aoste" is kept, with straight apostrophes. 108 `istat_code` values start with a zero. The 33 `eurostat_auto` rows in `dim_geography` are all non-Italian country codes, and the 8 inactive codes are pre-revision codes that no fact row references.
+
+**NUTS vintage.** The Italian codes serve as join keys for both NUTS 2021 and NUTS 2024. Statistics Poland's summary of the 2024 revision reports, for Italy, boundary changes to two NUTS2 and two NUTS3 units and one renamed NUTS3 unit. Which units these are should be checked against Eurostat's list of changes and recorded in the seed's description, since boundary changes break series without changing codes. NUTS 2027 (Regulation 2026/195) applies from 2027.
+
+**Codes in `fact_labour`.** ISTAT and Eurostat code the same categories differently (gender `total` and `T`, education `99` and `TOTAL`, citizenship `ITL` and `NAT`). ISTAT's codelists define education `13`, `7`, `11` and `99` as no qualification to lower secondary, upper and post-secondary, tertiary, and total; and citizenship `ITL`, `FRG` and `TOTAL` as Italian, foreign and total. These correspond to Eurostat's ISCED groups and citizenship codes by description, not through an official concordance. A missing breakdown is stored as `''` for education and citizenship and as NULL for the others. `TAXDISOCCU1_6` (education) and `NEET1_9` (citizenship) have components without totals. No dataset has an age total. `lfsa_egan22d` carries the 88 NACE divisions plus `TOTAL`. 42% of `fact_labour` rows are national figures for other countries.
+
+**Reference files.** `domain_sources.csv` registers `lfsa_egan22d` twice, under social_economy and labour; the labour row never matches, because the lookup key is the provider plus the dataset code. `nace_labels.csv` labels five NACE classes (`S94_11`, `S94_12`, `S94_91`, `S94_92`, `S94_99`) as groups, so a sum over groups would count S94 twice, and its `social_economy_relevant` column mixes `TRUE`, `FALSE` and `partial`. `dim_indicator` gives `n_employed` a single domain although both domains use it.
+
+**The social-economy copy of `lfsa_egan22d`.** This confirms and measures a case already listed under the merge issue (2026-11-02). The Eurostat branch of `merge_social_economy.py` drops sex and age, so the 66 combinations (3 sexes, 22 age bands) for each country, year and division become identical, and `resolve_priority()` keeps one at random: 813 rows, none of them identifiable. `nama_10r_3empers` and `sbs_r_nuts2021` are not affected, because every dimension other than territory, time and NACE has a single value. `resolve_priority()` also leaves `dataset_code` out of its keys, so two datasets with the same indicator and priority can silently replace each other. That does not happen with the current extractions.
+
+**Permissions.** `roles/storage.objectAdmin` does not include `storage.buckets.get`, which BigQuery needs to load files from Cloud Storage. `roles/storage.bucketViewer` was granted to `github-actions-pipeline@` on the bucket only.
+
+### Scope: dbt transforms, Python loads
+
+**Decision.** dbt owns everything from a raw BigQuery table onwards: the geography filter and Extra-Regio exclusion, period parsing, code harmonisation, dimensions, facts and marts. Python loads the latest processed parquet of each domain into a raw table, unchanged, and nothing else. `build_db.py` shrinks to that loader. `dimensions.sql`, `fact_tables.sql` (with its empty stubs) and `views.sql` are deleted at switch-over; a future domain gets dbt models when it is built.
+
+**Why.** dbt does not load files, so a small Python step remains in any design. Everything after loading is SQL over tables, which is what dbt is for.
+
+**Consequences.** Rows with an unknown indicator, source or code are no longer dropped with a log warning: they stay in staging and fail a test.
+
+### dbt runs as its own workflow step
+
+**Decision.** A separate step, "Build dbt models", after "Run pipeline". It runs when the chosen stage includes the database (`all` or `database`), and also after a failed pipeline step unless the run was cancelled, as the integrity checks do. It always builds every model, whatever the domain input. Locally the database stage becomes two commands: `python run_pipeline.py --stage database`, then `dbt build`.
+
+**Why.** A step gets its own log section, status and `if:` condition, so a dbt failure is visible as such. Each raw load is all or nothing per domain, so dbt after a partial failure at worst rebuilds from last month's raw table. Dimensions are shared across domains, and a full build takes seconds.
+
+### Raw data: load jobs from Cloud Storage, full refresh, no snapshots
+
+**Decision.** The loader calls `load_table_from_uri` on the latest processed file with `WRITE_TRUNCATE` into `aiccon_raw`, taking the schema from the parquet file, and appends a row per load to `aiccon_raw.load_log` (domain, file, rows, time). No external tables, no incremental loads and no dbt snapshots.
+
+**Why.** Processed files accumulate in GCS, so an external table over a domain's folder would union every monthly snapshot. External tables re-read Cloud Storage on every query and require every reader to have access to the bucket. Batch loads are free and all or nothing. Each processed file is a complete snapshot, so incremental loading would add state and failure modes for no saving. History already exists in the dated processed files and can be loaded later in one go; snapshots now would record merge artefacts as revisions, and a lost snapshot table cannot be rebuilt.
+
+**Consequences.** Loading from Cloud Storage requires the bucket and the dataset to share a location (both us-central1). The rule of 2026-11-02 stands: never delete old processed files. Staging casts every column explicitly, so a type change upstream fails loudly.
+
+### Three datasets, four layers, views inside and tables outside
+
+**Decision.** `aiccon_raw` (written by the loader), `aiccon_staging` (staging, intermediate and seeds) and `aiccon_marts` (dimensions, facts and flat marts). The production target's schema is `aiccon` and the development target's is `dev`, so dbt's default naming (target schema, underscore, custom schema) gives `aiccon_staging` and `dev_staging`, and local work never touches production. Layers: sources; staging (`stg_`, one model per raw table: rename, cast, blanks to NULL, out-of-scope rows flagged with a reason); intermediate (`int_`, business rules, code harmonisation, filtering); marts (`dim_`, `fact_`, `mart_`). Staging and intermediate are views; everything in `aiccon_marts` is a table. No partitioning or clustering.
+
+**Why.** Separate datasets give an access boundary: the Streamlit app and Gemini will see only the marts. `dbt build` skips models downstream of a failed test, so a mart built as a table keeps last month's contents when a test fails, whereas a view would expose the new data at once. The existing names `dim_*` and `fact_*` are kept so that `test_integrity.py` and PowerBI carry over. Storage stays far below the free tier.
+
+### Natural keys, and reference data as seeds
+
+**Decision.** No integer surrogate keys: facts and dimensions join on codes (`nuts_code`, `period_code`, `indicator_code`, the dataset code). `fact_key` and `dim_geography.is_active` are dropped. `dim_geography` is the distinct NUTS codes of the crosswalk, the ISTAT aggregates, and any code found in the facts but not in the crosswalk; a derived Italian code fails the build. Codes containing `;` keep a NULL level. Seeds: `nuts_istat.csv`, `domain_sources.csv`, `legal_form_map.csv`, `nace_labels.csv`, and new `indicators.csv` (from `populate_dim_indicator`, without a domain column, with `headline_age_group`), `breakdown_codes.csv` and a country-names seed for the 33 non-Italian countries, using Eurostat's codes (EL for Greece). Code columns are typed as strings. Each CSV exists once: dbt's `seed-paths` points at `processing/mappings/` if the installed version accepts a path outside the project, otherwise the files move into `dbt/seeds/` and the Python lookups follow. `dim_source` is keyed on the dataset code, without a domain. `dim_legal_form` and the always-NULL `legal_form_key` are deferred until a dataset carries a legal form.
+
+**Why.** Keys must be deterministic, not persistent: dimensions and facts are rebuilt together on every run, and nothing outside the build stores key values. Codes are defined by Eurostat, ISTAT or us, and no slowly changing dimensions are planned. Readable codes also matter for the planned text-to-SQL feature. A NUTS vintage change is a mapping problem that a surrogate key would hide, not solve.
+
+### `fact_labour`: periods, harmonised codes and declared headlines
+
+**Decision.** `dim_time` has one row per period, keyed on `period_code` (`2023`, `2023-Q2`, `2023-04`), with frequency, year, quarter, month and start and end dates. `breakdown_codes.csv` lists every code of every breakdown by provider, with the harmonised code (Eurostat's: `T/M/F`, `NAT/FOR/TOTAL`, `ED0-2/ED3_4/ED5-8/TOTAL`), labels, `is_total`, and numeric bounds for age bands. A NULL breakdown means the dataset has no such breakdown and counts as a total. The facts carry harmonised codes, one `is_total` flag per breakdown and `is_headline` (every breakdown at its total, and the indicator's headline age band). Headline bands: employment rate Y15-64, unemployment rate Y15-74, inactivity rate Y15-64, NEET rate Y15-29. The fact table keeps every source and frequency; marts choose. Marts about Italy use ISTAT; marts comparing countries use Eurostat for every country, Italy included; `dim_source.priority` stays as metadata. Rates are never summed or averaged across breakdowns; NACE counts are summed only within one level, excluding `TOTAL`. Published annual figures are used rather than averages of monthly ones. `lfsa_egan22d` is taken only from the labour data.
+
+**Order of marts.** First `mart_labour` (flat, with labels and flags) and `mart_labour_rates_regional` (ISTAT, Italy at every territorial level, annual, headline rows, employment, unemployment, inactivity and NEET). Then `mart_se_employment_eu` (`nama_10r_3empers`) and `mart_se_local_units_regional` (`sbs_r_nuts2021`). Held until the merge is fixed: `mart_labour_force_monthly` (several editions per observation in `FORZLVMENS1_1`) and the volunteering and association marts.
+
+**Why.** Putting the period in the key removes the annual time key shared by annual, quarterly and monthly rows. A seed makes the meaning of each code explicit and testable instead of inferred from its spelling, and a new code from a source fails the build until someone classifies it. Age bands nest, so a headline must be declared per indicator. A comparison needs every country from the same source, release and revision state.
+
+### Tests in dbt; `test_integrity.py` retired at switch-over
+
+**Decision.** dbt's built-in tests (`unique`, `not_null`, `accepted_values`, `relationships`) plus a few generic tests written in the project (minimum row count, uniqueness of a column combination for the grain, values within bounds by unit, and "contains all of these values"), and singular tests for Italian NUTS coverage and Italian codes missing from the crosswalk. No test packages. Code coverage is tested as `not_null` on the harmonised code after the join to the seed in the intermediate model. Dataset recency is a warning. `store_failures` writes failing rows to the audit dataset (`<target_schema>_dbt_test__audit`). A short script turns `target/run_results.json` into the run's Summary table.
+
+**Why.** Third-party packages may not work under dbt v2, and writing the generic tests is a good way to learn them. A test with one parent reliably stops the models downstream of it; a user report suggests a failing `relationships` test may not. Failing rows are easier to examine with a query than in a public log.
+
+**Consequences.** An error-severity failure fails the step and the run, and the marts keep last month's contents. Warnings do not fail the run. The digest still runs, because it reads GCS. `test_integrity.py` keeps checking `aiccon_data` until switch-over, as an independent check, and is then deleted.
+
+### Running dbt in GitHub Actions, and authentication
+
+**Decision.** dbt-bigquery's `oauth` method, which uses Application Default Credentials: in CI the credentials file written by `google-github-actions/auth`, locally the `aiccon-pipeline` key through `GOOGLE_APPLICATION_CREDENTIALS`. `dbt/profiles.yml` is committed and holds no secrets: two targets, `dev` (the default) and `prod`, the project from `BQ_PROJECT` through `env_var()`, location us-central1, `maximum_bytes_billed` and a job timeout. `DBT_PROFILES_DIR` points at it, and CI passes `--target prod`. No new roles are needed: `roles/bigquery.dataEditor` at project level includes creating datasets, and `roles/bigquery.jobUser` covers queries and the load jobs used for seeds.
+
+**Consequences.** Locally, `GOOGLE_APPLICATION_CREDENTIALS` and `BQ_PROJECT` must be set in the PowerShell session, because dbt does not read `config/.env`.
+
+### dbt Core v1.12, installed through uv
+
+**Decision.** `dbt-core` and `dbt-bigquery` 1.12, declared as `>=1.12,<1.13` in a `dbt` dependency group in `pyproject.toml`, with exact versions in `uv.lock`. Never the PyPI package named `dbt`, which now installs v2. Upgrades only through `uv lock --upgrade-package`. If dbt's dependencies conflict with the pipeline's, dbt gets its own project and lock file in `dbt/`. GitHub Actions installs with `uv sync --locked`, and `requirements.txt` is deleted. `pyproject.toml` is tidied first: `office365-rest-python-client` and `pandas-gbq` removed, `duckdb` and `jupyter` moved to the `dev` group, `google-cloud-storage`, `google-cloud-bigquery` and `PyYAML` declared, `genai` added to the packages built.
+
+**Why.** dbt v2's BigQuery adapter documents no way to use GitHub's federated credentials, and its local adapter is in preview. v1 is Apache 2.0; the full v2 distribution is proprietary. v1.12 supports Python 3.10 to 3.14, and, according to a summary of dbt's version page, is in active support until July 2027; dbt Labs states that v1.13 will receive critical support beyond the usual year. Check both before relying on them. `--locked` makes a run fail if `uv.lock` is out of date with `pyproject.toml`.
+
+**Revisit when** dbt v2's BigQuery adapter is generally available for local use and supports GitHub's federated credentials. Recheck the licence then too: it has changed twice since May 2025.
+
+### Switch-over: a parallel run with a parity check
+
+**Decision.** dbt builds the new datasets while `build_db.py` keeps maintaining `aiccon_data`. A warning-severity singular test compares old and new facts by dataset, indicator, territory and period, on row count and sum of values, with the 813 social-economy `lfsa_egan22d` rows excluded. The switch happens when a full `dbt build --target prod` has no error-severity failures, the parity test returns no rows or every row is explained, and the PowerBI report has been checked against `aiccon_marts`. Retirement then happens in separate commits, each confirmed by a manual run: the Python and SQL of the old database build; the integrity checks, the parity test and the legacy source; `aiccon_data` itself after one more monthly cycle; and the documentation (README, `data_dictionary.md`, whose column descriptions move into the dbt YAML files).
+
+**Why.** Comparing groups rather than rows is independent of the code harmonisation, but still catches a lost, duplicated or altered observation. Manual runs rebuild everything from the same raw files, so the switch does not have to wait for several monthly runs.
+
+**Consequences.** Listing the marts under "views" in `FACT_CHECKS`, planned earlier, is no longer needed: dbt's row-count tests on the marts do that job.
+
+### Open items outside the dbt project
+
+- `merge_social_economy.py`: remove `lfsa_egan22d` from `EUROSTAT_DATASET_META` (this also removes it from the digest's expected datasets), and add `dataset_code` to the keys in `resolve_priority()`. The rest of the merge issue is unchanged.
+- `domain_sources.csv`: remove the `eurostat_lfsa_egan22d_labour` row once `dim_source` is keyed on the dataset code.
+- `nace_labels.csv`: set the level of the five S94 classes to `class`.
+- `pipeline.yml`: `retention-days: 7;` has a stray semicolon (fixed with the dependency tidy-up).
+- README: the views, Python 3.11, and the bucket roles are out of date.
+
+
 
 ## 2026-11-02: Monthly digest with Gemini
 
@@ -102,6 +202,8 @@ The following decisions were taken together when the pipeline was moved from man
 
 ### `requirements.txt` for CI, `uv.lock` later
 
+**Superseded (2026-11-16).** GitHub Actions installs from `uv.lock` with `uv sync --locked`; `requirements.txt` was deleted.
+
 **Context.** Locally the environment is managed by uv. The old `requirements.txt` was a Windows `pip freeze` that would not install on Linux (an editable install from a local path, and the Windows-only `pywinpty`). `pyproject.toml` lists development tools (Jupyter, DuckDB, office365 client) as runtime dependencies, does not declare three packages the code imports directly (`google-cloud-bigquery`, `google-cloud-storage`, `PyYAML`), and includes `pandas-gbq`, which the code does not appear to use.
 
 **Decision.** `requirements.txt` now lists only the runtime imports, pinned to the tested local versions, and GitHub Actions installs from it with pip. Verified by installing it into a clean virtual environment and running the database stage and the integrity checks.
@@ -178,6 +280,8 @@ The following decisions were taken together when the pipeline was moved from man
 **Rationale**: Long format is source-agnostic — every dataset regardless of structure maps to the same schema. PowerBI handles long-format data well via slicers and filters. Wide format would require schema changes every time a new indicator is added.
 
 ### Decision: split schema into three SQL files
+**Superseded (2026-11-16).** The schema is defined by dbt models (see the dbt refactor entry). Kept for history.
+
 **Date**: 2026-05
 **Decision**: `dimensions.sql`, `fact_tables.sql`, `views.sql` rather than one monolithic SQL file.
 **Rationale**: Separation of concerns — dimensions are stable and shared, fact tables grow one domain at a time, views change frequently as colleagues request new analytical cuts. Keeping them separate makes each file easier to read and reduces the risk of accidentally breaking a dimension table when editing a view.
@@ -213,6 +317,8 @@ The following decisions were taken together when the pipeline was moved from man
 **Rationale**: AICCON's territorial analysis work is focused on Italy. Keeping non-Italian NUTS2 data would roughly multiply the row count by 15–20× for negligible analytical benefit. National totals are sufficient for EU comparison; Italian regional granularity is where the depth is needed. The filter is applied consistently in both the merge script and the database loader.
 
 ### Decision: monthly labour force time key resolves to annual row
+**Superseded (2026-11-16).** In the dbt project, `dim_time` has one row per period, keyed on `period_code`. Kept for history.
+
 **Date**: 2026-05
 **Decision**: The monthly `FORZLVMENS1_1` dataset stores `time_key` pointing to the annual `dim_time` row for the corresponding year, not a monthly row. The full `YYYY-MM` label is stored in the `period_label` column directly in `fact_labour`.
 **Rationale**: Creating monthly rows in `dim_time` (12 per year × ~20 years = ~240 rows) just to support one dataset would bloat the time dimension for no benefit to any other domain. The `period_label` column in the fact table is a clean solution that keeps `dim_time` purely annual while still allowing PowerBI to sort and filter monthly observations correctly. If a second monthly dataset is added later, the same pattern applies.
