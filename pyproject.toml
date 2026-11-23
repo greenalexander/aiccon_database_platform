@@ -19,12 +19,17 @@ dependencies = [
 
 [tool.uv]
 package = true
+default-groups = ["dev", "dbt"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
+dbt = [
+    "dbt-bigquery>=1.12,<1.13",
+    "dbt-core>=1.12,<1.13",
+]
 dev = [
     "duckdb>=2.0.0",
     "hatchling>=1.29.0",

@@ -1,0 +1,32 @@
+name: aiccon
+version: "1.0.0"
+profile: aiccon            # which entry in profiles.yml to use
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+target-path: "target"      # compiled SQL and run artefacts (not committed)
+clean-targets: ["target", "dbt_packages", "logs"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+# Folder-level defaults. "+" marks a configuration that applies to
+# everything in the folder; a model can still override it.
+models:
+  aiccon:
+    staging:
+      +schema: staging       # becomes <target schema>_staging
+      +materialized: view
+    intermediate:
+      +schema: staging
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+
+seeds:
+  aiccon:
+    +schema: staging

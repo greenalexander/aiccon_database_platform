@@ -101,6 +101,17 @@ jobs:
           echo "Running: python run_pipeline.py ${args[*]}"
           python run_pipeline.py "${args[@]}"
 
+      - name: Check dbt connection
+        # Temporary: proves dbt authenticates in Actions with the federated
+        # credentials. Replaced by "Build dbt models" once models exist.
+        # Runs when the stage includes the database, even if the pipeline
+        # step failed, unless the run was cancelled.
+        if: ${{ !cancelled() && steps.pipeline.outcome != 'skipped' && ((inputs.stage || 'all') == 'all' || inputs.stage == 'database') }}
+        working-directory: dbt
+        env:
+          DBT_PROFILES_DIR: ${{ github.workspace }}/dbt
+        run: dbt debug --target prod
+
       - name: Run integrity checks
         # Run even if the pipeline step failed, but not if the run was
         # cancelled or never reached the pipeline step (e.g. failed login).
