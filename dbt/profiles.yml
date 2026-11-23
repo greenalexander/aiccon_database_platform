@@ -1,0 +1,25 @@
+aiccon:
+  target: dev                # default: a plain "dbt build" never touches prod
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth          # Application Default Credentials
+      project: "{{ env_var('BQ_PROJECT') }}"
+      dataset: dev           # gives dev_staging, dev_marts
+      location: us-central1
+      threads: 4
+      priority: interactive
+      job_execution_timeout_seconds: 300
+      job_retries: 1
+      maximum_bytes_billed: 1000000000   # 1 GB per query
+    prod:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('BQ_PROJECT') }}"
+      dataset: aiccon        # gives aiccon_staging, aiccon_marts
+      location: us-central1
+      threads: 4
+      priority: interactive
+      job_execution_timeout_seconds: 300
+      job_retries: 1
+      maximum_bytes_billed: 1000000000
